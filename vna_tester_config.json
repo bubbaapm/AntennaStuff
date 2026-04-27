@@ -1,0 +1,21 @@
+{
+  "librevna_path": "D:\\Claude_stuff\\AntennaStuff\\LibreVNA\\release\\LibreVNA-GUI.exe",
+  "auto_launch": true,
+  "scpi_host": "localhost",
+  "scpi_port": 19542,
+  "last_sweep": {
+    "start_hz": 10000000.0,
+    "stop_hz": 6000000000.0,
+    "points": 1001,
+    "ifbw_hz": 1000.0,
+    "averaging": 1,
+    "power_dbm": -10.0
+  },
+  "saved_band_presets": {},
+  "default_export_dir": "D:\\Claude_stuff\\AntennaStuff",
+  "export_resolution": [
+    2560,
+    1440
+  ],
+  "session_dir": "sessions"
+}

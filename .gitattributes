@@ -1,0 +1,2 @@
+3DModels/**/*.sldprt filter=lfs diff=lfs merge=lfs -text
+3DModels/**/*.3mf filter=lfs diff=lfs merge=lfs -text
