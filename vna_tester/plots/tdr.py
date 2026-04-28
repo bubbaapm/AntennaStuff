@@ -154,14 +154,14 @@ class TDRPlot(PlotPanel):
         self.draw()
 
     def draw(self) -> None:
-        self.lbl_title.setText(self.title)
+        self.lbl_title.setText(self.header_title)
 
         visible: Dict[str, tuple[Trace, TraceAssignment]] = {}
         for a in self._assignments:
             if not a.visible:
                 continue
             t = self.traces.get(a.trace_name)
-            if t is None or t.freq.size < 8:
+            if t is None or t.freq.size < 8 or not t.visible:
                 continue
             visible[a.trace_name] = (t, a)
 

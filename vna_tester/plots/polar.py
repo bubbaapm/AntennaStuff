@@ -78,7 +78,7 @@ class PolarPlot(PlotPanel):
         self.fig.subplots_adjust(left=0.05, right=0.85, top=0.95, bottom=0.05)
 
     def draw(self) -> None:
-        self.lbl_title.setText(self.title)
+        self.lbl_title.setText(self.header_title)
 
         visible: Dict[str, tuple[Trace, TraceAssignment]] = {}
         max_mag = 1.0
@@ -86,7 +86,7 @@ class PolarPlot(PlotPanel):
             if not a.visible:
                 continue
             t = self.traces.get(a.trace_name)
-            if t is None or t.freq.size == 0:
+            if t is None or t.freq.size == 0 or not t.visible:
                 continue
             visible[a.trace_name] = (t, a)
             mm = float(np.max(np.abs(t.s))) if t.s.size else 0.0

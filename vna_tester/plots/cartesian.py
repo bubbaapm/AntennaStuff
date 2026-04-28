@@ -142,6 +142,16 @@ class CartesianPlot(PlotPanel):
         )
         v.addWidget(self.pw, 1)
 
+        # Legend — one shared LegendItem; we manually add/remove rows so
+        # right-axis curves (which live in a separate ViewBox) appear too.
+        self._legend = pg.LegendItem(
+            offset=(10, 10), labelTextColor="#e0e0e0",
+            brush=pg.mkBrush(20, 20, 20, 220),
+            pen=pg.mkPen(60, 60, 60, 200),
+        )
+        self._legend.setParentItem(self.pi)
+        self._legend_sig: Optional[str] = None
+
         # Persistent artist registries.
         # Curves keyed by f"{trace_name}|{format}|{axis}" so two assignments
         # of the same trace (e.g. S11 dB + S11 VSWR) don't collide.
@@ -170,7 +180,7 @@ class CartesianPlot(PlotPanel):
 
     # ------------------------------------------------------------ drawing
     def draw(self) -> None:
-        self.lbl_title.setText(self.title)
+        self.lbl_title.setText(self.header_title)
 
         # Gather active assignments by axis. Compose unique keys per
         # assignment so multiple S11 assignments (e.g. dB and VSWR) coexist.
@@ -182,7 +192,7 @@ class CartesianPlot(PlotPanel):
             if not a.visible:
                 continue
             t = self.traces.get(a.trace_name)
-            if t is None or t.freq.size == 0:
+            if t is None or t.freq.size == 0 or not t.visible:
                 continue
             key = self._curve_key(a)
             if a.axis == "right":
@@ -192,6 +202,7 @@ class CartesianPlot(PlotPanel):
 
         self._draw_axis_curves(left_assigns, self.pi, self._curves_left, seen_left)
         self._draw_axis_curves(right_assigns, self.right_vb, self._curves_right, seen_right)
+        self._refresh_legend(left_assigns, right_assigns)
 
         # Clamp how far the user can pan / zoom out — never beyond the
         # actual data range. Keeps "scroll wheel out forever" from leaving
@@ -262,6 +273,52 @@ class CartesianPlot(PlotPanel):
                     curve.setSymbolPen(color)
                 else:
                     curve.setSymbol(None)
+
+    def _refresh_legend(self,
+                        left_assigns: List[TraceAssignment],
+                        right_assigns: List[TraceAssignment]) -> None:
+        """Rebuild the legend rows from the current visible assignments."""
+        rows: List[tuple] = []
+        for a in left_assigns:
+            t = self.traces.get(a.trace_name)
+            if t is None:
+                continue
+            key = self._curve_key(a)
+            curve = self._curves_left.get(key)
+            if curve is None:
+                continue
+            label = f"{a.trace_name} · {a.y_format} (L)"
+            rows.append((key, label, curve, a.color_for(t), a.line_style, a.line_width))
+        for a in right_assigns:
+            t = self.traces.get(a.trace_name)
+            if t is None:
+                continue
+            key = self._curve_key(a)
+            curve = self._curves_right.get(key)
+            if curve is None:
+                continue
+            label = f"{a.trace_name} · {a.y_format} (R)"
+            rows.append((key, label, curve, a.color_for(t), a.line_style, a.line_width))
+
+        sig = ";".join(f"{k}|{lbl}|{c}|{s}|{w}" for k, lbl, _, c, s, w in rows)
+        if sig == self._legend_sig:
+            return
+        self._legend_sig = sig
+
+        # Rebuild from scratch — pyqtgraph LegendItem.clear() exists in
+        # current versions but isn't universal. Removing by sample handle
+        # is the portable path.
+        try:
+            for sample, label_item in list(self._legend.items):
+                self._legend.removeItem(label_item.text)
+        except Exception:
+            try:
+                self._legend.clear()
+            except Exception:
+                pass
+        for _, label, curve, _c, _s, _w in rows:
+            self._legend.addItem(curve, label)
+        self._legend.setVisible(bool(rows))
 
     def _clamp_pan_zoom_to_data(self, assigns: List[TraceAssignment]) -> None:
         """Set ViewBox.setLimits so the user cannot pan past the sweep range."""
@@ -425,7 +482,7 @@ class CartesianPlot(PlotPanel):
                 if not a.visible:
                     continue
                 t = self.traces.get(a.trace_name)
-                if t is None or t.freq.size == 0:
+                if t is None or t.freq.size == 0 or not t.visible:
                     continue
                 idx = int(np.argmin(np.abs(t.freq - m.freq_hz)))
                 y_at = float(_y_for(t, a.y_format, z0=self._z0)[idx])
@@ -520,7 +577,7 @@ class CartesianPlot(PlotPanel):
             if not a.visible:
                 continue
             t = self.traces.get(a.trace_name)
-            if t is None or t.freq.size == 0:
+            if t is None or t.freq.size == 0 or not t.visible:
                 continue
             idx = int(np.argmin(np.abs(t.freq - f_hz)))
             y_at = float(_y_for(t, a.y_format, z0=self._z0)[idx])

@@ -128,8 +128,38 @@ class PlotPanel(QWidget):
         self._request_redraw()
 
     def visible_assignments(self) -> List[TraceAssignment]:
-        return [a for a in self._assignments
-                if a.visible and self.traces.get(a.trace_name) is not None]
+        out = []
+        for a in self._assignments:
+            if not a.visible:
+                continue
+            t = self.traces.get(a.trace_name)
+            if t is None or not t.visible:
+                continue
+            out.append(a)
+        return out
+
+    def auto_title(self) -> str:
+        """
+        Title derived from the active assignments — e.g. "S11 (Cartesian)"
+        or "S11, S22 (Smith Chart)". Falls back to the bare plot kind when
+        nothing is assigned. Used as the default header when the user
+        hasn't typed a custom title in the configure dialog.
+        """
+        seen: set[str] = set()
+        params: List[str] = []
+        for a in self._assignments:
+            if a.trace_name in seen:
+                continue
+            seen.add(a.trace_name)
+            params.append(a.trace_name)
+        if not params:
+            return self.TITLE
+        return f"{', '.join(params)}  ({self.TITLE})"
+
+    @property
+    def header_title(self) -> str:
+        """The string that should appear in the panel's title label."""
+        return self.title if self.title and self.title != self.TITLE else self.auto_title()
 
     def markers_for_panel(self) -> List[Marker]:
         out = []

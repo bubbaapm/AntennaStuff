@@ -225,14 +225,37 @@ class VnaController(QObject):
 
     def get_touchstone(self, names: List[str]) -> str:
         """
-        Returns Touchstone-format text for the listed traces. The
-        device requires the trace count to be a perfect square (1, 4, ...).
+        Returns Touchstone-format text (Hz, S, real/imag, 50 Ω) for the
+        listed traces. Trace count must be a perfect square (1 or 4).
+        Built locally from per-trace VNA:TRAC:DATA? queries — LibreVNA's
+        SCPI server has no single-shot Touchstone export, and its trace
+        replies are line-based so a multi-line export wouldn't fit the
+        single-line SCPI reply contract anyway.
         """
-        try:
-            return self.client.query(":VNA:TRAC:TOUCH? " + ",".join(names))
-        except ScpiError as e:
-            self.error.emit(str(e))
+        if len(names) not in (1, 4):
+            self.error.emit(f"Touchstone needs 1 or 4 traces, got {len(names)}")
             return ""
+        freq_ref: Optional[np.ndarray] = None
+        cols: List[np.ndarray] = []
+        for name in names:
+            f, s = self.get_trace(name)
+            if f.size == 0:
+                return ""
+            if freq_ref is None:
+                freq_ref = f
+            elif f.shape != freq_ref.shape or not np.allclose(f, freq_ref):
+                self.error.emit(f"Trace {name} freq grid differs from {names[0]}")
+                return ""
+            cols.append(s)
+        assert freq_ref is not None
+        lines = ["# Hz S RI R 50"]
+        for i, f in enumerate(freq_ref):
+            row = [f"{f:.0f}"]
+            for c in cols:
+                row.append(f"{c[i].real:.12g} {c[i].imag:.12g}")
+            lines.append(" ".join(row))
+        lines.append("")
+        return "\n".join(lines)
 
     # -------------------------------------------------------- calibration
     def cal_active_type(self) -> str:

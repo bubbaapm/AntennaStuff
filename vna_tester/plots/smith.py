@@ -122,7 +122,7 @@ class SmithPlot(PlotPanel):
 
     # ------------------------------------------------------------ drawing
     def draw(self) -> None:
-        self.lbl_title.setText(self.title)
+        self.lbl_title.setText(self.header_title)
 
         # Active traces — anything in self._assignments that resolves.
         visible: Dict[str, tuple[Trace, TraceAssignment]] = {}
@@ -130,7 +130,7 @@ class SmithPlot(PlotPanel):
             if not a.visible:
                 continue
             t = self.traces.get(a.trace_name)
-            if t is None or t.freq.size == 0:
+            if t is None or t.freq.size == 0 or not t.visible:
                 continue
             visible[a.trace_name] = (t, a)
 

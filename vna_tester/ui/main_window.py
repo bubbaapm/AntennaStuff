@@ -168,7 +168,11 @@ class MainWindow(QMainWindow):
         a_save_s2p.triggered.connect(self._save_s2p)
         f.addAction(a_save_s2p)
 
-        a_load_ref = QAction("Load reference .s2p…", self)
+        a_save_s1p = QAction("Save current as .s1p…", self)
+        a_save_s1p.triggered.connect(self._save_s1p)
+        f.addAction(a_save_s1p)
+
+        a_load_ref = QAction("Load reference (.s1p / .s2p)…", self)
         a_load_ref.triggered.connect(self.trace_panel._load_reference)
         f.addAction(a_load_ref)
 
@@ -459,13 +463,23 @@ class MainWindow(QMainWindow):
         self._save_touchstone(default_name="antenna.s2p", port_count=2)
 
     def _save_s1p(self) -> None:
-        self._save_touchstone(default_name="antenna.s1p", port_count=1)
+        # Ask which port to export — S11 (port 1 reflection) or S22 (port 2).
+        choice, ok = QInputDialog.getItem(
+            self, "Save .s1p — choose port",
+            "Which port's reflection do you want to export?",
+            ["Port 1 (S11)", "Port 2 (S22)"], 0, False,
+        )
+        if not ok:
+            return
+        param = "S22" if choice.startswith("Port 2") else "S11"
+        default_name = f"antenna_{param.lower()}.s1p"
+        self._save_touchstone(default_name=default_name, port_count=1, s1p_param=param)
 
-    def _save_touchstone(self, default_name: str, port_count: int) -> None:
+    def _save_touchstone(self, default_name: str, port_count: int,
+                         s1p_param: str = "S11") -> None:
         if not self.controller.connected:
             QMessageBox.information(self, "Not connected", "Connect to the VNA first.")
             return
-        suffix = ".s1p" if port_count == 1 else ".s2p"
         flt = (
             "Touchstone S1P (*.s1p);;Touchstone S2P (*.s2p)" if port_count == 1
             else "Touchstone S2P (*.s2p);;Touchstone S1P (*.s1p)"
@@ -473,8 +487,8 @@ class MainWindow(QMainWindow):
         fn, _ = QFileDialog.getSaveFileName(self, "Save Touchstone", default_name, flt)
         if not fn:
             return
-        names = ["S11"] if (port_count == 1 or fn.lower().endswith(".s1p")) else \
-                ["S11", "S21", "S12", "S22"]
+        single = port_count == 1 or fn.lower().endswith(".s1p")
+        names = [s1p_param] if single else ["S11", "S21", "S12", "S22"]
         data = self.controller.get_touchstone(names)
         if not data.strip():
             QMessageBox.warning(self, "Save failed",

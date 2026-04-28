@@ -91,6 +91,18 @@ def _color_swatch(hex_color: str, size: int = 14) -> QIcon:
     return QIcon(pix)
 
 
+def _fit_list_to_contents(lst: QListWidget, min_rows: int = 1) -> None:
+    """Resize a QListWidget so it's exactly tall enough for its rows."""
+    rows = lst.count()
+    row_h = lst.sizeHintForRow(0)
+    if row_h <= 0:
+        # Fallback before any item has been laid out.
+        row_h = lst.fontMetrics().height() + 6
+    visible_rows = max(min_rows, rows)
+    h = visible_rows * row_h + 2 * lst.frameWidth() + 4
+    lst.setFixedHeight(h)
+
+
 class TracePanel(QGroupBox):
     """
     Lists every trace held by the TraceManager. Live traces are shown at
@@ -124,12 +136,14 @@ class TracePanel(QGroupBox):
             "Click to toggle visibility. Right-click for color.\n"
             "Live traces auto-update on every sweep."
         )
-        self.lst_live.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                    QSizePolicy.Policy.Expanding)
+        # Size-to-content rather than greedy expansion — _fit_list_to_contents
+        # below sets a fixed height after each refresh.
+        self.lst_live.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                    QSizePolicy.Policy.Fixed)
         self.lst_live.itemChanged.connect(self._on_item_changed)
         self.lst_live.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.lst_live.customContextMenuRequested.connect(self._ctx_menu_live)
-        v.addWidget(self.lst_live, 1)
+        v.addWidget(self.lst_live)
 
         lbl_ref = QLabel("References:")
         lbl_ref.setToolTip("Reference traces loaded from .s2p / .s1p files.")
@@ -139,19 +153,24 @@ class TracePanel(QGroupBox):
             "Reference traces are drawn dashed.\n"
             "Right-click to remove or recolor."
         )
-        self.lst_ref.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                   QSizePolicy.Policy.Expanding)
+        self.lst_ref.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                   QSizePolicy.Policy.Fixed)
         self.lst_ref.itemChanged.connect(self._on_item_changed)
         self.lst_ref.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.lst_ref.customContextMenuRequested.connect(self._ctx_menu_ref)
-        v.addWidget(self.lst_ref, 1)
+        v.addWidget(self.lst_ref)
 
         # Two compact rows of buttons so nothing overflows.
         compact_btn_qss = "QPushButton { padding: 4px 6px; }"
         row_a = QHBoxLayout()
-        self.btn_load_ref = QPushButton("Load .s2p…")
+        self.btn_load_ref = QPushButton("Load reference…")
         self.btn_load_ref.setStyleSheet(compact_btn_qss)
-        self.btn_load_ref.setToolTip("Import a Touchstone file as a reference overlay.")
+        self.btn_load_ref.setToolTip(
+            "Import a Touchstone file (.s1p or .s2p) as a static overlay.\n"
+            "References are drawn alongside live traces — handy for "
+            "comparing the current sweep against a saved measurement\n"
+            "or a known-good reference board. They never update on their own."
+        )
         self.btn_load_ref.clicked.connect(self._load_reference)
         row_a.addWidget(self.btn_load_ref)
         self.btn_clear_ref = QPushButton("Clear refs")
@@ -199,6 +218,8 @@ class TracePanel(QGroupBox):
             self.lst_ref.addItem(it)
         self.lst_live.blockSignals(False)
         self.lst_ref.blockSignals(False)
+        _fit_list_to_contents(self.lst_live, min_rows=1)
+        _fit_list_to_contents(self.lst_ref, min_rows=1)
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         name = item.data(Qt.ItemDataRole.UserRole)
