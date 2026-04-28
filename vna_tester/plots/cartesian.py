@@ -23,7 +23,10 @@ from PyQt6.QtWidgets import (
 
 from ..markers import Marker, MarkerKind
 from ..trace import Trace, TraceAssignment
-from .base import PlotPanel, default_assignments, register_plot, style_to_qt_pen
+from .base import (
+    PlotPanel, default_assignments, make_header_buttons, register_plot,
+    style_to_qt_pen,
+)
 
 pg.setConfigOptions(antialias=True, useOpenGL=False)
 
@@ -107,30 +110,11 @@ class CartesianPlot(PlotPanel):
         self.lbl_title.setStyleSheet("color:#00e0b4; font-weight:bold;")
         bar.addWidget(self.lbl_title)
         bar.addStretch(1)
-
-        self.btn_config = QPushButton("⚙")
-        self.btn_config.setFixedWidth(28)
-        self.btn_config.setToolTip("Configure traces, axes, colors, line styles…")
-        self.btn_config.clicked.connect(lambda: self.request_configure.emit(self))
-        bar.addWidget(self.btn_config)
-
-        self.btn_left = QPushButton("◀")
-        self.btn_left.setFixedWidth(28)
-        self.btn_left.setToolTip("Move plot one position left")
-        self.btn_left.clicked.connect(lambda: self.request_move.emit(self, -1))
-        bar.addWidget(self.btn_left)
-
-        self.btn_right = QPushButton("▶")
-        self.btn_right.setFixedWidth(28)
-        self.btn_right.setToolTip("Move plot one position right")
-        self.btn_right.clicked.connect(lambda: self.request_move.emit(self, +1))
-        bar.addWidget(self.btn_right)
-
-        self.btn_remove = QPushButton("✕")
-        self.btn_remove.setFixedWidth(28)
-        self.btn_remove.setToolTip("Remove this plot panel")
-        self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self))
-        bar.addWidget(self.btn_remove)
+        (self.btn_config, self.btn_reset, self.btn_left,
+         self.btn_right, self.btn_remove) = make_header_buttons(self)
+        for b in (self.btn_config, self.btn_reset, self.btn_left,
+                  self.btn_right, self.btn_remove):
+            bar.addWidget(b)
         v.addLayout(bar)
 
         self.pw = pg.PlotWidget()
@@ -167,6 +151,10 @@ class CartesianPlot(PlotPanel):
         # Per-marker dot lists: label -> list of (host, scatter)
         self._marker_dot_groups: Dict[str, List[tuple]] = {}
         self._region_items: Dict[str, pg.LinearRegionItem] = {}
+        # While a marker line is being dragged, we hold its label here so
+        # redraws don't snap it back to the model's stale freq_hz.
+        self._dragging_label: Optional[str] = None
+        self._dragging_freq: Optional[float] = None
 
         # Track applied axis state so we don't repeatedly re-enable autorange
         # (which silently kills the user's manual zoom on the next sweep).
@@ -205,6 +193,11 @@ class CartesianPlot(PlotPanel):
         self._draw_axis_curves(left_assigns, self.pi, self._curves_left, seen_left)
         self._draw_axis_curves(right_assigns, self.right_vb, self._curves_right, seen_right)
 
+        # Clamp how far the user can pan / zoom out — never beyond the
+        # actual data range. Keeps "scroll wheel out forever" from leaving
+        # data behind a wall of empty axis.
+        self._clamp_pan_zoom_to_data(left_assigns + right_assigns)
+
         # Axis labels — pick the format of the first trace on each side
         if left_assigns:
             self.pi.setLabel("left", left_assigns[0].y_format)
@@ -214,7 +207,9 @@ class CartesianPlot(PlotPanel):
             self.pi.setLabel("right", right_assigns[0].y_format)
             self.pi.showAxis("right")
         else:
-            self.pi.setLabel("right", "")
+            # No traces on the right axis → hide it entirely so it doesn't
+            # dump phantom tick labels and gridlines onto the plot.
+            self.pi.hideAxis("right")
 
         # Apply axis ranges
         self._apply_axis_ranges()
@@ -268,6 +263,19 @@ class CartesianPlot(PlotPanel):
                 else:
                     curve.setSymbol(None)
 
+    def _clamp_pan_zoom_to_data(self, assigns: List[TraceAssignment]) -> None:
+        """Set ViewBox.setLimits so the user cannot pan past the sweep range."""
+        f_min = float("inf"); f_max = float("-inf")
+        for a in assigns:
+            t = self.traces.get(a.trace_name)
+            if t is None or t.freq.size == 0:
+                continue
+            f_min = min(f_min, float(t.freq[0]))
+            f_max = max(f_max, float(t.freq[-1]))
+        if f_min < f_max:
+            self.pi.vb.setLimits(xMin=f_min, xMax=f_max)
+            self.right_vb.setLimits(xMin=f_min, xMax=f_max)
+
     def _apply_axis_ranges(self) -> None:
         """
         Only push axis state to pyqtgraph when our local config actually
@@ -306,6 +314,20 @@ class CartesianPlot(PlotPanel):
                               "yl": (None, None, None),
                               "yr": (None, None, None)}
         super().set_axis_ranges(*args, **kwargs)
+
+    def reset_view(self) -> None:
+        """Force auto-range immediately (used by reset button + sweep change)."""
+        self.x_auto = True
+        self.yl_auto = True
+        self.yr_auto = True
+        # Invalidate cache and immediately push enableAutoRange to pyqtgraph.
+        self._applied_axes = {"x": (None, None, None),
+                              "yl": (None, None, None),
+                              "yr": (None, None, None)}
+        self.pi.enableAutoRange(axis="x", enable=True)
+        self.pi.enableAutoRange(axis="y", enable=True)
+        self.right_vb.enableAutoRange(axis="y", enable=True)
+        self._request_redraw()
 
     def _draw_markers(self) -> None:
         markers = self.markers_for_panel()
@@ -364,14 +386,23 @@ class CartesianPlot(PlotPanel):
                                "movable": True, "position": 0.95},
                 )
                 if movable:
+                    # sigDragged fires CONTINUOUSLY during drag; we use it
+                    # to keep the model in sync so background redraws don't
+                    # snap the line back to a stale position.
+                    line.sigDragged.connect(
+                        lambda l, label=m.label: self._on_line_dragging(label, float(l.value()))
+                    )
                     line.sigPositionChangeFinished.connect(
-                        lambda l, label=m.label: self.marker_dragged.emit(label, float(l.value()))
+                        lambda l, label=m.label: self._on_line_drag_finished(label, float(l.value()))
                     )
                 self._install_marker_context(line, m.label)
                 self.pi.addItem(line)
                 self._marker_lines[m.label] = line
             else:
-                line.setValue(m.freq_hz)
+                # Don't reset the position of a line currently being dragged;
+                # the user's mouse is the source of truth.
+                if m.label != self._dragging_label:
+                    line.setValue(m.freq_hz)
                 line.setPen(pg.mkPen(QColor(m.color), width=1, style=Qt.PenStyle.DotLine))
                 line.label.setText(m.label)
                 line.setMovable(m.kind == MarkerKind.NORMAL)
@@ -409,6 +440,35 @@ class CartesianPlot(PlotPanel):
                 new_groups.append((host, scatter))
             if new_groups:
                 self._marker_dot_groups[m.label] = new_groups
+
+    def _after_markers_set(self) -> None:
+        """If a redraw arrived mid-drag, preserve the live drag position."""
+        if self._dragging_label is None or self._dragging_freq is None:
+            return
+        for m in self._markers:
+            if m.label == self._dragging_label:
+                m.freq_hz = self._dragging_freq
+                break
+
+    def _on_line_dragging(self, label: str, freq_hz: float) -> None:
+        """Called continuously while the user is dragging a marker line."""
+        self._dragging_label = label
+        self._dragging_freq = freq_hz
+        # Update our local marker model so the dot+regions follow live.
+        for m in self._markers:
+            if m.label == label:
+                m.freq_hz = freq_hz
+                break
+        # Force a redraw of just the dots/regions for this marker — line
+        # position is owned by pyqtgraph during drag, don't touch it.
+        self._request_redraw()
+
+    def _on_line_drag_finished(self, label: str, freq_hz: float) -> None:
+        """Called once when the mouse is released."""
+        self._dragging_label = None
+        self._dragging_freq = None
+        # Sync the model upward so the marker panel + sibling plots update.
+        self.marker_dragged.emit(label, freq_hz)
 
     def _install_marker_context(self, line: pg.InfiniteLine, label: str) -> None:
         """Surface a right-click menu by intercepting the line's mouseClickEvent."""

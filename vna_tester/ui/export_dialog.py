@@ -2,6 +2,7 @@
 Image export dialog — pick file, format, resolution, and what to export.
 """
 from __future__ import annotations
+import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -11,6 +12,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
     QWidget, QRadioButton, QGroupBox, QButtonGroup,
 )
+
+from ..paths import default_export_dir
 
 
 COMMON_RESOLUTIONS = [
@@ -35,10 +38,14 @@ class ExportDialog(QDialog):
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("Export image")
-        self.resize(640, 540)
-        self.setMinimumSize(480, 460)
+        self.resize(640, 560)
+        self.setMinimumSize(520, 500)
         self._panels = list(panel_titles)
-        self._default_dir = default_dir
+        # Resolve default dir: prefer user-saved, else <app>/Images.
+        if default_dir:
+            self._default_dir = Path(default_dir)
+        else:
+            self._default_dir = default_export_dir()
         self._build()
 
     def _build(self) -> None:
@@ -103,16 +110,48 @@ class ExportDialog(QDialog):
         gf.addRow("Custom:", row)
         v.addWidget(gb_res)
 
-        # File path
+        # File path — folder + filename split for clarity.
         gb_file = QGroupBox("Destination")
-        gh = QHBoxLayout(gb_file)
-        self.le_path = QLineEdit(self._default_dir)
-        self.le_path.setPlaceholderText("output.png")
-        gh.addWidget(self.le_path, 1)
-        b = QPushButton("…")
-        b.setFixedWidth(28)
-        b.clicked.connect(self._browse)
-        gh.addWidget(b)
+        gv = QVBoxLayout(gb_file)
+
+        # Folder row
+        row_folder = QHBoxLayout()
+        row_folder.addWidget(QLabel("Folder:"))
+        self.le_folder = QLineEdit(str(self._default_dir))
+        self.le_folder.setToolTip(
+            "Folder where the image is saved.\n"
+            "Default: <app>/Images (created on first export)."
+        )
+        row_folder.addWidget(self.le_folder, 1)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.clicked.connect(self._browse_folder)
+        row_folder.addWidget(btn_browse)
+        gv.addLayout(row_folder)
+
+        # Filename row
+        row_name = QHBoxLayout()
+        row_name.addWidget(QLabel("Filename:"))
+        # Build a sensible default name: vna_<YYYYMMDD-HHMMSS>
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.le_name = QLineEdit(f"vna_{ts}")
+        self.le_name.setToolTip(
+            "Filename (without extension — that's set by the format below)."
+        )
+        row_name.addWidget(self.le_name, 1)
+        gv.addLayout(row_name)
+
+        # Format row
+        row_fmt = QHBoxLayout()
+        row_fmt.addWidget(QLabel("Format:"))
+        self.cb_fmt = QComboBox()
+        self.cb_fmt.addItems(["png", "jpg", "svg", "pdf"])
+        self.cb_fmt.setToolTip(
+            "PNG = sharp raster (default).  SVG/PDF = vector (matplotlib panels only).\n"
+            "JPG = smaller file, lossy."
+        )
+        row_fmt.addWidget(self.cb_fmt)
+        row_fmt.addStretch(1)
+        gv.addLayout(row_fmt)
         v.addWidget(gb_file)
 
         bb = QDialogButtonBox(
@@ -134,28 +173,31 @@ class ExportDialog(QDialog):
             self.sp_w.setValue(wh[0])
             self.sp_h.setValue(wh[1])
 
-    def _browse(self) -> None:
-        fn, _ = QFileDialog.getSaveFileName(
-            self, "Save image as", self.le_path.text() or "output.png",
-            "PNG (*.png);;JPEG (*.jpg);;SVG vector (*.svg);;PDF (*.pdf)"
+    def _browse_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose export folder",
+            self.le_folder.text() or str(self._default_dir)
         )
-        if fn:
-            self.le_path.setText(fn)
+        if folder:
+            self.le_folder.setText(folder)
 
     def selection(self) -> dict:
         what = "panel" if self.rb_panel.isChecked() else (
             "window" if self.rb_window.isChecked() else "screenshot"
         )
         wh = (int(self.sp_w.value()), int(self.sp_h.value()))
-        path = self.le_path.text().strip()
-        if not path:
-            path = "vna_export.png"
-        if not Path(path).suffix:
-            path += ".png"
+        folder = Path(self.le_folder.text().strip() or self._default_dir)
+        # Make sure the folder exists; we'll write into it.
+        folder.mkdir(parents=True, exist_ok=True)
+        name = self.le_name.text().strip() or "vna_export"
+        fmt = self.cb_fmt.currentText().lower()
+        # Strip any extension the user typed and re-apply the chosen one.
+        stem = Path(name).stem or "vna_export"
+        path = folder / f"{stem}.{fmt}"
         return {
             "what": what,
             "panel": self.cb_panel.currentText(),
             "size": wh,
-            "path": path,
-            "fmt": Path(path).suffix.lstrip(".").lower(),
+            "path": str(path),
+            "fmt": fmt,
         }

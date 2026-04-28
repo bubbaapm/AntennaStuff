@@ -133,6 +133,7 @@ class PlotGrid(QWidget):
         panel.request_remove.connect(self._remove_panel)
         panel.request_move.connect(self._move_panel)
         panel.request_configure.connect(self.panel_configure.emit)
+        panel.request_reset_view.connect(lambda p=panel: p.reset_view())
         panel.marker_placed.connect(self.marker_placed.emit)
         if hasattr(panel, "marker_dragged"):
             panel.marker_dragged.connect(self.marker_dragged.emit)
@@ -162,11 +163,20 @@ class PlotGrid(QWidget):
             self._remove_panel(p)
 
     def _relayout(self) -> None:
+        # Clear existing items
         while self._grid.count():
             item = self._grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 self._grid.removeWidget(w)
+        # Reset stretches from any previous layout — otherwise rows/cols
+        # left over from a wider grid keep their stretch and the surviving
+        # panels stay locked at their old sizes after a delete.
+        for r in range(self._grid.rowCount() + 1):
+            self._grid.setRowStretch(r, 0)
+        for c in range(self._grid.columnCount() + 1):
+            self._grid.setColumnStretch(c, 0)
+
         n = len(self._panels)
         self.lbl_count.setText(f"{n} plot{'s' if n != 1 else ''}")
         if n == 0:
@@ -174,6 +184,8 @@ class PlotGrid(QWidget):
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setStyleSheet("color:#666; padding:40px;")
             self._grid.addWidget(empty, 0, 0)
+            self._grid.setRowStretch(0, 1)
+            self._grid.setColumnStretch(0, 1)
             return
         cols = 1 if n == 1 else (2 if n <= 4 else 3)
         for i, p in enumerate(self._panels):

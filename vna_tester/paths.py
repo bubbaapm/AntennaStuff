@@ -27,6 +27,11 @@ def app_root() -> Path:
 CONFIG_FILE = app_root() / "vna_tester_config.json"
 
 
+def default_export_dir() -> Path:
+    """The "Images" folder next to the app — created on first export."""
+    return app_root() / "Images"
+
+
 # ----------------------------------------------------------------- config IO
 DEFAULT_CONFIG: dict = {
     "librevna_path": None,           # absolute path to LibreVNA-GUI.exe
@@ -35,6 +40,9 @@ DEFAULT_CONFIG: dict = {
     "scpi_port": 19542,
     "last_sweep": {},                # last successful sweep settings
     "saved_band_presets": {},        # user-defined band presets
+    # Empty string means "use the auto-default": <app_root>/Images.
+    # Computed lazily so the path is always under the app folder, which
+    # works on a flash-drive too.
     "default_export_dir": "",
     "export_resolution": [1920, 1080],
     "session_dir": "sessions",

@@ -17,7 +17,8 @@ from PyQt6.QtWidgets import (
 
 from ..trace import Trace, TraceAssignment
 from .base import (
-    PlotPanel, default_assignments, register_plot, style_to_mpl,
+    PlotPanel, default_assignments, make_header_buttons, register_plot,
+    style_to_mpl,
 )
 
 
@@ -52,20 +53,11 @@ class PolarPlot(PlotPanel):
         self.lbl_title.setStyleSheet("color:#00e0b4; font-weight:bold;")
         bar.addWidget(self.lbl_title)
         bar.addStretch(1)
-
-        self.btn_config = QPushButton("⚙"); self.btn_config.setFixedWidth(28)
-        self.btn_config.setToolTip("Configure traces and styles")
-        self.btn_config.clicked.connect(lambda: self.request_configure.emit(self))
-        bar.addWidget(self.btn_config)
-        self.btn_left = QPushButton("◀"); self.btn_left.setFixedWidth(28)
-        self.btn_left.clicked.connect(lambda: self.request_move.emit(self, -1))
-        bar.addWidget(self.btn_left)
-        self.btn_right = QPushButton("▶"); self.btn_right.setFixedWidth(28)
-        self.btn_right.clicked.connect(lambda: self.request_move.emit(self, +1))
-        bar.addWidget(self.btn_right)
-        self.btn_remove = QPushButton("✕"); self.btn_remove.setFixedWidth(28)
-        self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self))
-        bar.addWidget(self.btn_remove)
+        (self.btn_config, self.btn_reset, self.btn_left,
+         self.btn_right, self.btn_remove) = make_header_buttons(self)
+        for b in (self.btn_config, self.btn_reset, self.btn_left,
+                  self.btn_right, self.btn_remove):
+            bar.addWidget(b)
         v.addLayout(bar)
 
         self.fig = Figure(figsize=(5, 5), facecolor="#1d1d1d")

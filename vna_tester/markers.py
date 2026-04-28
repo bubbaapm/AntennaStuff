@@ -27,8 +27,8 @@ class MarkerKind(Enum):
 # Human-friendly labels for the right-click menu / UI.
 MARKER_KIND_LABELS = {
     MarkerKind.NORMAL:   "Normal (fixed freq)",
-    MarkerKind.PEAK:     "Peak (tracks maximum)",
-    MarkerKind.MIN:      "Min / dip (tracks minimum)",
+    MarkerKind.PEAK:     "Max (tracks maximum)",
+    MarkerKind.MIN:      "Min (tracks minimum)",
     MarkerKind.TARGET:   "Target dB (first crossing)",
     MarkerKind.BW_M10DB: "Bandwidth box (target-dB band)",
     MarkerKind.DELTA:    "Delta (difference)",

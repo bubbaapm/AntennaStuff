@@ -14,7 +14,7 @@ from abc import abstractmethod
 from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QPushButton, QStyle, QWidget
 
 from ..markers import Marker
 from ..trace import Trace, TraceAssignment, TraceManager
@@ -35,6 +35,7 @@ class PlotPanel(QWidget):
     request_remove = pyqtSignal(object)             # self when × clicked
     request_move = pyqtSignal(object, int)          # self, direction (-1 / +1)
     request_configure = pyqtSignal(object)          # self when ⚙ clicked
+    request_reset_view = pyqtSignal(object)         # self when ⟲ clicked
     marker_placed = pyqtSignal(str, float, str)     # trace_name, freq_hz, panel_id
     marker_dragged = pyqtSignal(str, float)         # marker label, new freq_hz
     marker_context = pyqtSignal(str, object)        # label, screen_pos QPoint
@@ -87,7 +88,13 @@ class PlotPanel(QWidget):
 
     def set_markers(self, markers: List[Marker]) -> None:
         self._markers = list(markers)
+        # Subclasses may override to preserve drag state — see CartesianPlot.
+        self._after_markers_set()
         self._request_redraw()
+
+    def _after_markers_set(self) -> None:
+        """Hook for subclasses to fix up state after the master list arrived."""
+        pass
 
     def set_z0(self, z0: float) -> None:
         self._z0 = float(z0)
@@ -109,6 +116,16 @@ class PlotPanel(QWidget):
 
     def _request_redraw(self) -> None:
         self._redraw_timer.start()
+
+    def reset_view(self) -> None:
+        """
+        Default implementation: switch all axes back to auto-range.
+        Subclasses (cartesian) override to push state to pyqtgraph immediately.
+        """
+        self.x_auto = True
+        self.yl_auto = True
+        self.yr_auto = True
+        self._request_redraw()
 
     def visible_assignments(self) -> List[TraceAssignment]:
         return [a for a in self._assignments
@@ -165,6 +182,49 @@ class PlotPanel(QWidget):
 def register_plot(kind: str) -> None:
     if kind not in PLOT_TYPES:
         PLOT_TYPES.append(kind)
+
+
+def make_header_buttons(panel: PlotPanel):
+    """
+    Build the standard 5-button header row (configure / reset / left /
+    right / remove). Returns the buttons in a list so subclasses can lay
+    them out themselves; signals are pre-wired to the panel.
+    Uses Qt's standard icons so symbols always render legibly across
+    platforms / fonts (no more box-glyphs for ⚙ ◀ ▶ ✕).
+    """
+    style = panel.style()
+
+    btn_config = QPushButton()
+    btn_config.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+    btn_config.setFixedWidth(28)
+    btn_config.setToolTip("Configure traces, axes, colors, line styles…")
+    btn_config.clicked.connect(lambda: panel.request_configure.emit(panel))
+
+    btn_reset = QPushButton()
+    btn_reset.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+    btn_reset.setFixedWidth(28)
+    btn_reset.setToolTip("Reset zoom — fit all axes to the current data")
+    btn_reset.clicked.connect(lambda: panel.request_reset_view.emit(panel))
+
+    btn_left = QPushButton()
+    btn_left.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
+    btn_left.setFixedWidth(28)
+    btn_left.setToolTip("Move plot one position left")
+    btn_left.clicked.connect(lambda: panel.request_move.emit(panel, -1))
+
+    btn_right = QPushButton()
+    btn_right.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
+    btn_right.setFixedWidth(28)
+    btn_right.setToolTip("Move plot one position right")
+    btn_right.clicked.connect(lambda: panel.request_move.emit(panel, +1))
+
+    btn_remove = QPushButton()
+    btn_remove.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+    btn_remove.setFixedWidth(28)
+    btn_remove.setToolTip("Remove this plot panel")
+    btn_remove.clicked.connect(lambda: panel.request_remove.emit(panel))
+
+    return btn_config, btn_reset, btn_left, btn_right, btn_remove
 
 
 def style_to_qt_pen(line_style: str):

@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
 
 from ..trace import Trace, TraceAssignment
 from .base import (
-    PlotPanel, default_assignments, register_plot, style_to_qt_pen,
+    PlotPanel, default_assignments, make_header_buttons, register_plot,
+    style_to_qt_pen,
 )
 
 
@@ -89,19 +90,11 @@ class TDRPlot(PlotPanel):
         self.lbl_title.setStyleSheet("color:#00e0b4; font-weight:bold;")
         head.addWidget(self.lbl_title)
         head.addStretch(1)
-        self.btn_config = QPushButton("⚙"); self.btn_config.setFixedWidth(28)
-        self.btn_config.setToolTip("Configure traces and styles")
-        self.btn_config.clicked.connect(lambda: self.request_configure.emit(self))
-        head.addWidget(self.btn_config)
-        self.btn_left = QPushButton("◀"); self.btn_left.setFixedWidth(28)
-        self.btn_left.clicked.connect(lambda: self.request_move.emit(self, -1))
-        head.addWidget(self.btn_left)
-        self.btn_right = QPushButton("▶"); self.btn_right.setFixedWidth(28)
-        self.btn_right.clicked.connect(lambda: self.request_move.emit(self, +1))
-        head.addWidget(self.btn_right)
-        self.btn_remove = QPushButton("✕"); self.btn_remove.setFixedWidth(28)
-        self.btn_remove.clicked.connect(lambda: self.request_remove.emit(self))
-        head.addWidget(self.btn_remove)
+        (self.btn_config, self.btn_reset, self.btn_left,
+         self.btn_right, self.btn_remove) = make_header_buttons(self)
+        for b in (self.btn_config, self.btn_reset, self.btn_left,
+                  self.btn_right, self.btn_remove):
+            head.addWidget(b)
         v.addLayout(head)
 
         # Controls row

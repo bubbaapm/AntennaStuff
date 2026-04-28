@@ -10,9 +10,12 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QColorDialog, QComboBox, QDoubleSpinBox, QGroupBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu, QPushButton,
-    QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
+
+from ..units import parse_frequency, format_freq_input
 
 
 def _shrinkable_combo(c: QComboBox, min_chars: int = 5) -> None:
@@ -69,7 +72,7 @@ class MarkerPanel(QGroupBox):
         row1 = QHBoxLayout()
         self.cb_kind = QComboBox()
         self.cb_kind.addItem("Normal", MarkerKind.NORMAL.value)
-        self.cb_kind.addItem("Peak", MarkerKind.PEAK.value)
+        self.cb_kind.addItem("Max", MarkerKind.PEAK.value)
         self.cb_kind.addItem("Min", MarkerKind.MIN.value)
         self.cb_kind.addItem("Target", MarkerKind.TARGET.value)
         self.cb_kind.addItem("BW box", MarkerKind.BW_M10DB.value)
@@ -91,15 +94,19 @@ class MarkerPanel(QGroupBox):
 
         # Add row 2: freq + style + add
         row2 = QHBoxLayout()
-        self.sp_freq = QDoubleSpinBox()
-        self.sp_freq.setDecimals(3)
-        self.sp_freq.setRange(0.001, 99_999.0)
-        self.sp_freq.setSuffix(" MHz")
-        self.sp_freq.setValue(2400.0)
-        self.sp_freq.setToolTip("Frequency for Normal markers (start hint for Target).")
-        self.sp_freq.setSizePolicy(QSizePolicy.Policy.Preferred,
+        # QLineEdit (not QDoubleSpinBox) so users can type "2.4G", "915M",
+        # "1.575 GHz", "2400" (assumed MHz), etc.
+        self.sp_freq = QLineEdit("2.4 GHz")
+        self.sp_freq.setToolTip(
+            "Marker frequency. Free-form input — try:\n"
+            "  2.4G        → 2.4 GHz\n"
+            "  915M / 915MHz / 915 MHz → 915 MHz\n"
+            "  100k        → 100 kHz\n"
+            "  2400        → 2400 MHz (bare numbers default to MHz)\n"
+            "  1.575 GHz   → 1.575 GHz"
+        )
+        self.sp_freq.setSizePolicy(QSizePolicy.Policy.Ignored,
                                    QSizePolicy.Policy.Preferred)
-        self.sp_freq.setMinimumWidth(80)
         row2.addWidget(self.sp_freq, 1)
         self.cb_style = QComboBox()
         for s in MARKER_STYLES:
@@ -133,7 +140,7 @@ class MarkerPanel(QGroupBox):
         # Quick-add convenience buttons
         quick = QHBoxLayout()
         for label, kind, tip in [
-            ("Peak", MarkerKind.PEAK, "Auto-peak marker on the selected trace."),
+            ("Max",  MarkerKind.PEAK, "Auto-max marker on the selected trace."),
             ("Min",  MarkerKind.MIN,  "Auto-min (resonance) marker on the selected trace."),
             ("BW",   MarkerKind.BW_M10DB,
              "Bandwidth-box marker at the target dB band on the selected trace."),
@@ -156,6 +163,10 @@ class MarkerPanel(QGroupBox):
         for col, w in enumerate([46, 46, 78, 44, 44, 70, 60]):
             self.tbl.setColumnWidth(col, w)
         self.tbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        # Allow editing only the f column (col 2), via double-click.
+        self.tbl.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked
+                                 | QTableWidget.EditTrigger.EditKeyPressed)
+        self.tbl.itemChanged.connect(self._on_table_item_changed)
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -234,39 +245,100 @@ class MarkerPanel(QGroupBox):
         self.markers_changed.emit(list(self._markers))
 
     def _populate_table(self) -> None:
-        self.tbl.setRowCount(len(self._markers))
-        prev_freq: Optional[float] = None
-        for i, m in enumerate(self._markers):
-            scope_suffix = " *" if m.scope == "panel" else ""
-            self.tbl.setItem(i, 0, QTableWidgetItem(m.label + scope_suffix))
-            self.tbl.setItem(i, 1, QTableWidgetItem(m.trace_name))
-            if m.kind == MarkerKind.BW_M10DB:
-                f_text = f"{format_freq(m.freq_hz)}–{format_freq(m.secondary_freq_hz)} (Δ {format_freq(m.bandwidth_hz())})"
-            else:
-                f_text = format_freq(m.freq_hz)
-            self.tbl.setItem(i, 2, QTableWidgetItem(f_text))
-            self.tbl.setItem(i, 3, QTableWidgetItem(f"{m.last_db:.2f}"))
-            self.tbl.setItem(i, 4, QTableWidgetItem(f"{m.last_vswr:.2f}"))
-            self.tbl.setItem(i, 5, QTableWidgetItem(format_z(m.last_z)))
-            delta = ""
-            if prev_freq is not None and m.kind != MarkerKind.BW_M10DB:
-                delta = format_freq(abs(m.freq_hz - prev_freq))
-            self.tbl.setItem(i, 6, QTableWidgetItem(delta))
-            prev_freq = m.freq_hz
+        # Block itemChanged while we rewrite cells, otherwise our own
+        # repopulation looks like a user edit.
+        self.tbl.blockSignals(True)
+        try:
+            self.tbl.setRowCount(len(self._markers))
+            prev_freq: Optional[float] = None
+            non_editable = (Qt.ItemFlag.ItemIsSelectable
+                            | Qt.ItemFlag.ItemIsEnabled)
+            editable = non_editable | Qt.ItemFlag.ItemIsEditable
+            for i, m in enumerate(self._markers):
+                scope_suffix = " *" if m.scope == "panel" else ""
+                cells = [
+                    (m.label + scope_suffix, non_editable),
+                    (m.trace_name, non_editable),
+                    (
+                        # Editable freq column. For BW we show two ends + Δ.
+                        f"{format_freq(m.freq_hz)}–{format_freq(m.secondary_freq_hz)} (Δ {format_freq(m.bandwidth_hz())})"
+                        if m.kind == MarkerKind.BW_M10DB
+                        else format_freq_input(m.freq_hz),
+                        # Only NORMAL markers get an editable freq — auto
+                        # markers recompute every sweep, so editing is futile.
+                        editable if m.kind == MarkerKind.NORMAL else non_editable,
+                    ),
+                    (f"{m.last_db:.2f}", non_editable),
+                    (f"{m.last_vswr:.2f}", non_editable),
+                    (format_z(m.last_z), non_editable),
+                    (
+                        format_freq(abs(m.freq_hz - prev_freq))
+                        if prev_freq is not None and m.kind != MarkerKind.BW_M10DB
+                        else "",
+                        non_editable,
+                    ),
+                ]
+                for col, (text, flags) in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    item.setFlags(flags)
+                    if col == 0:
+                        item.setForeground(QColor(m.color))
+                        item.setToolTip(
+                            f"{m.label} — kind={m.kind.value}, scope={m.scope}\n"
+                            f"Right-click row for color / scope / type / remove."
+                        )
+                    if col == 2 and m.kind == MarkerKind.NORMAL:
+                        item.setToolTip(
+                            "Double-click to type a new frequency.\n"
+                            "Accepts 2.4G, 915M, 1.575 GHz, 2400 (= MHz)…"
+                        )
+                    self.tbl.setItem(i, col, item)
+                prev_freq = m.freq_hz
+        finally:
+            self.tbl.blockSignals(False)
 
-            color_item = self.tbl.item(i, 0)
-            if color_item is not None:
-                color_item.setForeground(QColor(m.color))
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        """User committed a typed-in frequency — parse it & update the marker."""
+        try:
+            col = item.column()
+        except RuntimeError:
+            # Item already deleted (e.g. handler re-entered after refresh).
+            return
+        if col != 2:
+            return
+        row = item.row()
+        if not (0 <= row < len(self._markers)):
+            return
+        m = self._markers[row]
+        if m.kind != MarkerKind.NORMAL:
+            return
+        new_hz = parse_frequency(item.text(), default_unit_hz=1e6)
+        if new_hz is None:
+            QMessageBox.warning(
+                self, "Bad frequency",
+                f"Couldn't parse '{item.text()}'. Use forms like 2.4G, 915M, "
+                "1.575 GHz, or a bare number (taken as MHz)."
+            )
+            # Repopulate restores the prior text.
+            self._refresh_values()
+            return
+        m.freq_hz = new_hz
+        self._refresh_values()
 
     def _on_add_clicked(self) -> None:
         kind = MarkerKind(self.cb_kind.currentData())
         trace = self.cb_trace.currentText().strip() or "S11"
-        f = float(self.sp_freq.value()) * 1e6  # MHz → Hz
+        f = parse_frequency(self.sp_freq.text(), default_unit_hz=1e6)
+        if f is None:
+            QMessageBox.warning(self, "Bad frequency",
+                                f"Couldn't parse '{self.sp_freq.text()}'.\n"
+                                "Try forms like 2.4G, 915M, 1.575 GHz, 2400.")
+            return
         idx = len(self._markers) + 1
         label = self._unique_label({
             MarkerKind.NORMAL: f"M{idx}",
-            MarkerKind.PEAK: "Peak",
-            MarkerKind.MIN: "Dip",
+            MarkerKind.PEAK: "Max",
+            MarkerKind.MIN: "Min",
             MarkerKind.TARGET: "Tgt",
             MarkerKind.BW_M10DB: "BW",
         }[kind])
@@ -297,8 +369,8 @@ class MarkerPanel(QGroupBox):
             return
         idx = len(self._markers) + 1
         base = {
-            MarkerKind.PEAK: "Peak",
-            MarkerKind.MIN: "Dip",
+            MarkerKind.PEAK: "Max",
+            MarkerKind.MIN: "Min",
             MarkerKind.BW_M10DB: "BW",
         }.get(kind, f"M{idx}")
         label = self._unique_label(base)

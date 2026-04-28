@@ -353,11 +353,21 @@ class MainWindow(QMainWindow):
         self.controller.apply_sweep(cfg)
         self.cfg["last_sweep"] = cfg.__dict__
         save_config(self.cfg)
+        # New sweep range → reset every plot's view so the plot zooms to
+        # whatever was just configured, instead of staying at the old span.
+        self._reset_all_plot_views()
         self.statusBar().showMessage(
             f"Applied: {cfg.start_hz/1e6:.2f}–{cfg.stop_hz/1e6:.2f} MHz · "
             f"{cfg.points} pts · IFBW {cfg.ifbw_hz:g} Hz · avg {cfg.averaging}",
             5000,
         )
+
+    def _reset_all_plot_views(self) -> None:
+        for p in self.plot_grid.panels():
+            try:
+                p.reset_view()
+            except Exception:
+                pass
 
     def _apply_sweep_clicked(self) -> None:
         self._on_sweep_changed(self.sweep_panel.read_config())
@@ -617,6 +627,9 @@ class MainWindow(QMainWindow):
         cfg = self.controller.read_sweep_config()
         if cfg.points > 0:
             self.sweep_panel.write_config(cfg)
+            # The cal range may differ from what's on screen — reset views
+            # so the user sees the cal'd band, not the previous one.
+            self._reset_all_plot_views()
             self.statusBar().showMessage(
                 f"Sweep range pulled from device: "
                 f"{cfg.start_hz/1e6:.2f}–{cfg.stop_hz/1e6:.2f} MHz · {cfg.points} pts",
