@@ -25,3 +25,5 @@ Thumbs.db
 .idea/
 
 vna_tester_config.json
+
+!LibreVNAImages/**/*.png
