@@ -15,7 +15,9 @@ After all steps complete the user can:
   • Apply and close
 """
 from __future__ import annotations
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -193,13 +195,30 @@ class CalibrationDialog(QDialog):
 
     # --------------------------------------------------------- step setup
     def _on_type_changed(self, text: str) -> None:
+        # Build the step list in-memory only. We deliberately do NOT
+        # touch the device here — opening the dialog or browsing cal
+        # types should never wipe an already-active calibration. The
+        # device gets reset and populated lazily on the first Measure
+        # click (see _ensure_device_initialized).
         self._cal_type = text
-        self.controller.cal_reset()
         self._steps = make_steps(text)
+        for s in self._steps:
+            s.measurement_index = 0
         self._populate_list()
+        self._refresh_list()
+
+    def _ensure_device_initialized(self) -> None:
+        """Reset and pre-register all steps on the device.
+
+        Called lazily before the first measurement so just opening the
+        dialog (or flipping the cal-type combobox) doesn't destroy an
+        active calibration the user wants to keep.
+        """
+        if any(s.measurement_index > 0 for s in self._steps):
+            return
+        self.controller.cal_reset()
         for s in self._steps:
             s.measurement_index = self.controller.cal_add(s.std_type, port=s.port)
-        self._refresh_list()
 
     def _populate_list(self) -> None:
         self.lst.clear()
@@ -240,6 +259,7 @@ class CalibrationDialog(QDialog):
         i = self.lst.currentRow()
         if not (0 <= i < len(self._steps)):
             return
+        self._ensure_device_initialized()
         step = self._steps[i]
         if step.measurement_index <= 0:
             step.measurement_index = self.controller.cal_add(step.std_type, port=step.port)
@@ -276,21 +296,72 @@ class CalibrationDialog(QDialog):
         self._refresh_list()
 
     # ----------------------------------------------------------- finalize
-    def _activate(self) -> None:
+    def _activate(self) -> bool:
         token = CAL_ACTIVATE_TOKEN.get(self._cal_type, "")
         if not token:
-            return
+            return False
+        # LibreVNA refuses to activate when required measurements are
+        # missing, but :VNA:CAL:ACT is fire-and-forget — without this
+        # gate the UI would happily claim "Activated" while the device
+        # silently rejected it. Isolation is genuinely optional.
+        missing = [s.label for s in self._steps
+                   if not s.completed and s.std_type != "ISOLATION"]
+        if missing:
+            QMessageBox.warning(
+                self, "Incomplete calibration",
+                "These steps haven't been measured:\n  • "
+                + "\n  • ".join(missing)
+                + "\n\nMeasure them before activating."
+            )
+            return False
         self.controller.cal_activate(token)
-        self.lbl_status.setText(f"Activated: {token}")
-        self.lbl_status.setStyleSheet("color:#00e0b4;")
+        active = self.controller.cal_active_type().strip().upper()
+        if active and active not in ("NONE", ""):
+            self.lbl_status.setText(f"Activated: {active}")
+            self.lbl_status.setStyleSheet("color:#00e0b4;")
+            return True
+        self.lbl_status.setText(
+            "Activate failed — device reports no active cal. "
+            "Re-check measurements."
+        )
+        self.lbl_status.setStyleSheet("color:#ff5252;")
+        return False
 
     def _save(self) -> None:
-        fn, _ = QFileDialog.getSaveFileName(self, "Save calibration",
-                                            "calibration.cal",
-                                            "LibreVNA calibration (*.cal);;All files (*)")
-        if fn:
-            self.controller.cal_save(fn)
+        # :VNA:CAL:SAVE writes the *active* calibration. If the user
+        # hits Save without Activate, LibreVNA silently writes nothing
+        # — that's the "I clicked save but no file appeared" trap.
+        active = self.controller.cal_active_type().strip().upper()
+        if active in ("", "NONE"):
+            if not self._activate():
+                return
+        # Default to the project's cals/ folder so files don't end up
+        # in LibreVNA-GUI's working directory.
+        cals_dir = Path(__file__).resolve().parents[2] / "cals"
+        default_dir = cals_dir if cals_dir.exists() else Path.home()
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Save calibration",
+            str(default_dir / "calibration.cal"),
+            "LibreVNA calibration (*.cal);;All files (*)",
+        )
+        if not fn:
+            return
+        self.controller.cal_save(fn)
+        # SCPI write is fire-and-forget; poll briefly for the file to
+        # actually land so we can give honest feedback.
+        path = Path(fn)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not path.exists():
+            time.sleep(0.1)
+        if path.exists() and path.stat().st_size > 0:
             self.lbl_status.setText(f"Saved: {fn}")
+            self.lbl_status.setStyleSheet("color:#00e0b4;")
+        else:
+            self.lbl_status.setText(
+                f"Save failed — no file at {fn}. "
+                "Make sure a calibration is active."
+            )
+            self.lbl_status.setStyleSheet("color:#ff5252;")
 
     def _load(self) -> None:
         fn, _ = QFileDialog.getOpenFileName(self, "Load calibration", "",

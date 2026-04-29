@@ -1,0 +1,9 @@
+main hex: 7.9 mm
+flat cyclinder width: 7.26 mm
+	full cylinder width: 8.36 mm
+
+rubber sheath: 9.76 mm
+rubber sheath bump: 10.18 mm
+rubbear sheat on cable: 7.5 mm
+
+cable: 4.05 mm
