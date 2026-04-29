@@ -1,0 +1,7 @@
+ability to have multiple BW markers (Say antenna is resonant at multiple frequencies and goes above goal dB, but I want to mark a goal BW at multiple frequencies
+
+Ablitity to change marker frequency after creating (by typing in number for frequency by either clicking on f cell in marker window on right side, or double clicking or right clicking marker on plot for changing to frequency of choice)
+
+Calibration loading should alter windows and points accordingly i.e. 1.5 GHz to 6 GHz and 1001 point calibration sets the start stop from 1.5 GHz to 6 GHz with 1001 points and sets scales in current plots accordingly
+
+ability to expand marker window when it fills up (either get bigger on its own, or ability to drag down to show all desired markers

@@ -1,0 +1,71 @@
+2.4 GHz dipole:
+
+	Initial dims:
+		Copper diam: 2.54 mm
+		Feed length: 31.79 mm
+		ground length: 30.59 mm	
+		gap length: 0.75 mm
+
+	Original dims S11, VSWR, and BW at 2.4 GH:
+		S11:
+		VSWR:
+		BW (-10 dB): 
+	
+	Original dims S11, VSWR, and BW @ min S11 freq:
+		Freq: 
+		S11: 
+		VSWR:
+		BW (-10 dB):
+
+	New dims:
+		Feed length:  mm
+		ground length:  mm	
+		gap length:  mm
+
+	New dims S11, VSWR, and BW @ 2.4 GHz:
+		S11:
+		VSWR:
+		BW (-10 dB): 
+	
+	New dims S11, VSWR, and BW @ min S11 freq:
+		Freq: 
+		S11: 
+		VSWR:
+		BW (-10 dB):
+
+
+5.8 GHz Dipole:
+
+	
+	Initial dims:
+		Copper diam: 2.54 mm
+		Feed length: 14.37 mm
+		ground length: 12.48 mm	
+		gap length: 0.66 mm
+
+	Original dims S11, VSWR, and BW at 2.4 GH:
+		S11:
+		VSWR:
+		BW (-10 dB): 
+	
+	Original dims S11, VSWR, and BW @ min S11 freq:
+		Freq: 
+		S11: 
+		VSWR:
+		BW (-10 dB):
+
+	New dims:
+		Feed length:  mm
+		ground length:  mm	
+		gap length:  mm
+
+	New dims S11, VSWR, and BW @ 5.8 GHz:
+		S11:
+		VSWR:
+		BW (-10 dB): 
+	
+	New dims S11, VSWR, and BW @ min S11 freq:
+		Freq: 
+		S11: 
+		VSWR:
+		BW (-10 dB):

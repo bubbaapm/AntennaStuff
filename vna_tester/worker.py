@@ -129,6 +129,31 @@ class CalMeasureWorker(QObject):
         try:
             self.progress.emit(f"Measuring {self._desc}…")
             self._client.write(":VNA:CAL:MEAS " + ",".join(str(i) for i in self._indices))
+            # Wait for BUSY to actually flip TRUE before polling for FALSE.
+            # MEAS is fire-and-forget; if we poll BUSY too eagerly we read
+            # the pre-MEAS idle state and falsely conclude the measurement
+            # already finished — so the step appears to "run instantly"
+            # without ever capturing data. Block here until the device
+            # acknowledges it's busy (or a sane startup timeout).
+            started = False
+            for _ in range(60):  # ~3 s at 50 ms
+                time.sleep(0.05)
+                try:
+                    if self._client.query_bool(":VNA:CAL:BUSY?"):
+                        started = True
+                        break
+                except ScpiError as e:
+                    self.error.emit(str(e))
+                    self.finished.emit(False)
+                    return
+            if not started:
+                self.error.emit(
+                    "VNA never reported busy after :VNA:CAL:MEAS — the "
+                    "measurement did not run. Check the device connection "
+                    "and try again."
+                )
+                self.finished.emit(False)
+                return
             for _ in range(2400):  # up to ~2 minutes @ 50 ms
                 time.sleep(0.05)
                 try:
