@@ -113,6 +113,7 @@ class TracePanel(QGroupBox):
 
     save_s2p_requested = pyqtSignal()
     save_s1p_requested = pyqtSignal()
+    references_loaded = pyqtSignal(list)   # list[str] — newly added trace names
 
     def __init__(self, traces: TraceManager, parent=None):
         super().__init__("Traces", parent)
@@ -257,25 +258,38 @@ class TracePanel(QGroupBox):
             self.traces.set_color(name, c.name())
 
     def _load_reference(self) -> None:
-        fn, _ = QFileDialog.getOpenFileName(
-            self, "Load Touchstone reference", "",
+        # Multi-select: dropping a folder of antenna captures in at once is
+        # the common case. Per-file errors don't abort the rest.
+        fns, _ = QFileDialog.getOpenFileNames(
+            self, "Load Touchstone reference(s)", "",
             "Touchstone files (*.s1p *.s2p);;All files (*)"
         )
-        if not fn:
+        if not fns:
             return
-        try:
-            entries = _read_touchstone(fn)
-        except Exception as e:
-            QMessageBox.warning(self, "Load failed", f"{type(e).__name__}: {e}")
-            return
-        if not entries:
-            QMessageBox.warning(self, "Load failed", "No data parsed from file.")
-            return
-        base = Path(fn).stem
-        for param, freq, s in entries:
-            self.traces.add_reference(
-                name=f"{base}:{param}",
-                parameter=param,
-                freq=freq, s=s,
-                source_file=fn,
+        added: List[str] = []
+        failed: List[str] = []
+        for fn in fns:
+            try:
+                entries = _read_touchstone(fn)
+            except Exception as e:
+                failed.append(f"{Path(fn).name}: {type(e).__name__}: {e}")
+                continue
+            if not entries:
+                failed.append(f"{Path(fn).name}: no data parsed")
+                continue
+            base = Path(fn).stem
+            for param, freq, s in entries:
+                t = self.traces.add_reference(
+                    name=f"{base}:{param}",
+                    parameter=param,
+                    freq=freq, s=s,
+                    source_file=fn,
+                )
+                added.append(t.name)
+        if added:
+            self.references_loaded.emit(added)
+        if failed:
+            QMessageBox.warning(
+                self, "Load failed",
+                "Some files couldn't be loaded:\n  • " + "\n  • ".join(failed),
             )

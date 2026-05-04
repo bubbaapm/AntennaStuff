@@ -27,6 +27,22 @@ DEFAULT_TRACE_COLORS = {
     "S12": "#ff6b9d",
 }
 
+# Cycled when references are added so each loaded .s1p/.s2p gets its own
+# color out of the box — desaturated relative to the live-trace palette so
+# the live sweep still pops against a stack of references.
+REFERENCE_COLORS = (
+    "#a0a0a0",  # gray (legacy default)
+    "#c5e1a5",  # light green
+    "#90caf9",  # light blue
+    "#ffcc80",  # light orange
+    "#ce93d8",  # light purple
+    "#ef9a9a",  # light red
+    "#80deea",  # light cyan
+    "#fff59d",  # light yellow
+    "#bcaaa4",  # warm taupe
+    "#b0bec5",  # cool gray-blue
+)
+
 LINE_STYLES = ("solid", "dash", "dot", "dashdot")
 
 
@@ -196,9 +212,13 @@ class TraceManager(QObject):
                       source_file: str = "") -> Trace:
         if name in self._traces:
             name = self._unique_name(name)
+        # Cycle through the reference palette by reference-count so loading
+        # a folder of .s1p files doesn't yield ten identical gray traces.
+        idx = len(self.references())
+        color = REFERENCE_COLORS[idx % len(REFERENCE_COLORS)]
         t = Trace(
             name=name, parameter=parameter, freq=freq, s=s,
-            color="#a0a0a0", is_reference=True, source_file=source_file,
+            color=color, is_reference=True, source_file=source_file,
         )
         self._traces[name] = t
         self.traces_changed.emit()

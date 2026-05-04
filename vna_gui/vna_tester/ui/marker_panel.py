@@ -4,7 +4,9 @@ Marker panel — tabular readouts plus add/remove buttons.
 Markers update automatically whenever the underlying trace data changes.
 """
 from __future__ import annotations
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -83,7 +85,10 @@ class MarkerPanel(QGroupBox):
             " • Peak — tracks the trace maximum each sweep.\n"
             " • Min — tracks the trace minimum (resonance dip).\n"
             " • Target — places at the first crossing of the target dB.\n"
-            " • -10 dB BW — markers at the contiguous −10 dB band edges."
+            " • BW box — bandwidth band at the target dB. When you type a\n"
+            "    frequency before adding it, the marker locks to the\n"
+            "    resonance nearest that frequency — add one per resonance\n"
+            "    on a multi-band antenna."
         )
         row1.addWidget(self.cb_kind, 1)
         self.cb_trace = QComboBox()
@@ -162,13 +167,18 @@ class MarkerPanel(QGroupBox):
         # Sensible default widths so nothing forces the panel to overflow.
         for col, w in enumerate([46, 46, 78, 44, 44, 70, 60]):
             self.tbl.setColumnWidth(col, w)
-        self.tbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        # Grow the table to fit its rows (like the Live / References lists),
+        # not greedily fill all remaining space. _fit_table_to_contents below
+        # sets a fixed height after each repopulation.
+        self.tbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         # Allow editing only the f column (col 2), via double-click.
+        # Per-item flags (set in _populate_table) gate which cells are
+        # actually editable — the trigger just opens the editor on
+        # cells that already have the editable flag.
         self.tbl.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked
                                  | QTableWidget.EditTrigger.EditKeyPressed)
         self.tbl.itemChanged.connect(self._on_table_item_changed)
         self.tbl.verticalHeader().setVisible(False)
-        self.tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.tbl.setToolTip(
@@ -241,6 +251,27 @@ class MarkerPanel(QGroupBox):
             if not m.color or m.color == "#ffffff":
                 m.color = MARKER_COLORS[i % len(MARKER_COLORS)]
             m.evaluate(tr, z0=self._z0)
+            # Compute readouts at the resolved primary freq for each
+            # extra trace the user attached. We snap to the closest sample
+            # (same convention the primary uses).
+            m.extra_readings.clear()
+            for ex_name in list(m.extra_traces):
+                tx = self.traces.get(ex_name)
+                if tx is None or tx.freq.size == 0 or ex_name == m.trace_name:
+                    continue
+                idx = int(np.argmin(np.abs(tx.freq - m.freq_hz)))
+                s = tx.s[idx]
+                mag = max(abs(s), 1e-12)
+                clipped = min(mag, 0.999_999)
+                if abs(1.0 - s) > 1e-9:
+                    z = self._z0 * (1.0 + s) / (1.0 - s)
+                else:
+                    z = complex(float("inf"), 0.0)
+                m.extra_readings[ex_name] = {
+                    "db": 20.0 * np.log10(mag),
+                    "vswr": (1.0 + clipped) / (1.0 - clipped),
+                    "z": z,
+                }
         self._populate_table()
         self.markers_changed.emit(list(self._markers))
 
@@ -249,53 +280,133 @@ class MarkerPanel(QGroupBox):
         # repopulation looks like a user edit.
         self.tbl.blockSignals(True)
         try:
-            self.tbl.setRowCount(len(self._markers))
-            prev_freq: Optional[float] = None
+            # Flatten markers + their extra-trace rows into a single row
+            # list. Each row's column-0 UserRole carries (label, is_primary,
+            # extra_name) so the context-menu / edit / remove handlers can
+            # map row → marker without keeping a parallel list.
+            rows: List[Tuple["Marker", bool, str]] = []
+            for m in self._markers:
+                rows.append((m, True, ""))
+                for ex in m.extra_traces:
+                    if ex == m.trace_name:
+                        continue
+                    if ex not in m.extra_readings:
+                        # Skip extras that didn't resolve (trace removed
+                        # under us etc.) — refresh_values cleared the cache.
+                        continue
+                    rows.append((m, False, ex))
+            self.tbl.setRowCount(len(rows))
+
             non_editable = (Qt.ItemFlag.ItemIsSelectable
                             | Qt.ItemFlag.ItemIsEnabled)
             editable = non_editable | Qt.ItemFlag.ItemIsEditable
-            for i, m in enumerate(self._markers):
+            prev_freq: Optional[float] = None
+
+            for r, (m, is_primary, ex_name) in enumerate(rows):
                 scope_suffix = " *" if m.scope == "panel" else ""
+                if is_primary:
+                    label_text = m.label + scope_suffix
+                    trace_text = m.trace_name
+                    if m.kind == MarkerKind.BW_M10DB:
+                        f_text = (f"{format_freq(m.freq_hz)}–{format_freq(m.secondary_freq_hz)} "
+                                  f"(Δ {format_freq(m.bandwidth_hz())})")
+                        f_flags = non_editable
+                    else:
+                        f_text = format_freq_input(m.freq_hz)
+                        f_flags = (editable if m.kind == MarkerKind.NORMAL
+                                   else non_editable)
+                    db_val = m.last_db
+                    vswr_val = m.last_vswr
+                    z_val = m.last_z
+                    df_text = (format_freq(abs(m.freq_hz - prev_freq))
+                               if prev_freq is not None and m.kind != MarkerKind.BW_M10DB
+                               else "")
+                    text_color = QColor(m.color)
+                else:
+                    rd = m.extra_readings.get(ex_name, {})
+                    label_text = "  ↳"
+                    trace_text = ex_name
+                    f_text = ""
+                    f_flags = non_editable
+                    db_val = float(rd.get("db", 0.0))
+                    vswr_val = float(rd.get("vswr", 1.0))
+                    z_val = rd.get("z", 0+0j)
+                    df_text = ""
+                    # Extra rows take the trace's color so it's clear which
+                    # value belongs to which trace.
+                    tref = self.traces.get(ex_name)
+                    text_color = QColor(tref.color) if tref is not None else QColor("#888")
+
                 cells = [
-                    (m.label + scope_suffix, non_editable),
-                    (m.trace_name, non_editable),
-                    (
-                        # Editable freq column. For BW we show two ends + Δ.
-                        f"{format_freq(m.freq_hz)}–{format_freq(m.secondary_freq_hz)} (Δ {format_freq(m.bandwidth_hz())})"
-                        if m.kind == MarkerKind.BW_M10DB
-                        else format_freq_input(m.freq_hz),
-                        # Only NORMAL markers get an editable freq — auto
-                        # markers recompute every sweep, so editing is futile.
-                        editable if m.kind == MarkerKind.NORMAL else non_editable,
-                    ),
-                    (f"{m.last_db:.2f}", non_editable),
-                    (f"{m.last_vswr:.2f}", non_editable),
-                    (format_z(m.last_z), non_editable),
-                    (
-                        format_freq(abs(m.freq_hz - prev_freq))
-                        if prev_freq is not None and m.kind != MarkerKind.BW_M10DB
-                        else "",
-                        non_editable,
-                    ),
+                    (label_text, non_editable),
+                    (trace_text, non_editable),
+                    (f_text, f_flags),
+                    (f"{db_val:.2f}", non_editable),
+                    (f"{vswr_val:.2f}", non_editable),
+                    (format_z(z_val), non_editable),
+                    (df_text, non_editable),
                 ]
                 for col, (text, flags) in enumerate(cells):
                     item = QTableWidgetItem(text)
                     item.setFlags(flags)
                     if col == 0:
-                        item.setForeground(QColor(m.color))
-                        item.setToolTip(
-                            f"{m.label} — kind={m.kind.value}, scope={m.scope}\n"
-                            f"Right-click row for color / scope / type / remove."
-                        )
-                    if col == 2 and m.kind == MarkerKind.NORMAL:
+                        item.setForeground(text_color)
+                        if is_primary:
+                            item.setToolTip(
+                                f"{m.label} — kind={m.kind.value}, scope={m.scope}\n"
+                                f"Right-click row for color / scope / type / extras / remove."
+                            )
+                        else:
+                            item.setToolTip(
+                                f"Extra readout: {ex_name} at "
+                                f"{format_freq_input(m.freq_hz)}.\n"
+                                f"Manage via right-click on the marker's primary row."
+                            )
+                        # Stash row → marker identity here so handlers can
+                        # find the owning marker without a parallel list.
+                        item.setData(Qt.ItemDataRole.UserRole,
+                                     (m.label, is_primary, ex_name))
+                    if col == 2 and is_primary and m.kind == MarkerKind.NORMAL:
                         item.setToolTip(
                             "Double-click to type a new frequency.\n"
                             "Accepts 2.4G, 915M, 1.575 GHz, 2400 (= MHz)…"
                         )
-                    self.tbl.setItem(i, col, item)
-                prev_freq = m.freq_hz
+                    self.tbl.setItem(r, col, item)
+                if is_primary:
+                    prev_freq = m.freq_hz
         finally:
             self.tbl.blockSignals(False)
+        self._fit_table_to_contents()
+
+    def _row_owner(self, row: int) -> Optional[Tuple[str, bool, str]]:
+        """Return (marker_label, is_primary, extra_trace_name) for a row,
+        or None if the row isn't ours."""
+        if row < 0:
+            return None
+        item = self.tbl.item(row, 0)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, tuple) or len(data) != 3:
+            return None
+        return data
+
+    def _marker_by_label(self, label: str) -> Optional["Marker"]:
+        return next((m for m in self._markers if m.label == label), None)
+
+    def _fit_table_to_contents(self) -> None:
+        """Size the marker table to exactly the rows it holds, with a small
+        floor so the empty state still shows the column headers."""
+        rows = self.tbl.rowCount()
+        row_h = self.tbl.verticalHeader().defaultSectionSize()
+        if row_h <= 0:
+            row_h = self.tbl.fontMetrics().height() + 6
+        header_h = self.tbl.horizontalHeader().height()
+        # 1 row of slack when empty so the "no markers yet" state isn't a
+        # 1-pixel strip; otherwise just header + rows.
+        visible_rows = max(1, rows)
+        h = header_h + visible_rows * row_h + 2 * self.tbl.frameWidth() + 4
+        self.tbl.setFixedHeight(h)
 
     def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
         """User committed a typed-in frequency — parse it & update the marker."""
@@ -306,11 +417,11 @@ class MarkerPanel(QGroupBox):
             return
         if col != 2:
             return
-        row = item.row()
-        if not (0 <= row < len(self._markers)):
-            return
-        m = self._markers[row]
-        if m.kind != MarkerKind.NORMAL:
+        owner = self._row_owner(item.row())
+        if owner is None or not owner[1]:
+            return  # extras can't be edited from here
+        m = self._marker_by_label(owner[0])
+        if m is None or m.kind != MarkerKind.NORMAL:
             return
         new_hz = parse_frequency(item.text(), default_unit_hz=1e6)
         if new_hz is None:
@@ -344,9 +455,14 @@ class MarkerPanel(QGroupBox):
         }[kind])
         color = MARKER_COLORS[(idx - 1) % len(MARKER_COLORS)]
         style = self.cb_style.currentText()
+        # For BW markers the typed freq anchors the resonance search — that's
+        # how the user gets one BW marker per resonance instead of all of
+        # them collapsing to the same global minimum.
+        anchor = f if kind == MarkerKind.BW_M10DB else 0.0
         self._markers.append(Marker(label=label, kind=kind, trace_name=trace,
-                                    freq_hz=f, color=color, target_db=-10.0,
-                                    style=style))
+                                    freq_hz=f, color=color,
+                                    target_db=self._target_db,
+                                    style=style, anchor_freq_hz=anchor))
         self._refresh()
 
     def _unique_label(self, base: str) -> str:
@@ -382,10 +498,16 @@ class MarkerPanel(QGroupBox):
         self._refresh()
 
     def _on_remove_clicked(self) -> None:
-        rows = sorted({i.row() for i in self.tbl.selectedItems()}, reverse=True)
-        for r in rows:
-            if 0 <= r < len(self._markers):
-                del self._markers[r]
+        # Selecting an extra row should still remove the owning marker —
+        # extras are part of one logical marker, not their own entities.
+        labels: set = set()
+        for it in self.tbl.selectedItems():
+            owner = self._row_owner(it.row())
+            if owner is not None:
+                labels.add(owner[0])
+        if not labels:
+            return
+        self._markers = [m for m in self._markers if m.label not in labels]
         self._refresh()
 
     def _add_normal_external(self, trace_name: str, freq_hz: float,
@@ -429,11 +551,14 @@ class MarkerPanel(QGroupBox):
 
     # ------------------------------------------------------- context menus
     def _on_table_context(self, pos) -> None:
-        i = self.tbl.indexAt(pos).row()
-        if i < 0 or i >= len(self._markers):
+        owner = self._row_owner(self.tbl.indexAt(pos).row())
+        if owner is None:
             return
         screen = self.tbl.viewport().mapToGlobal(pos)
-        self.show_marker_menu(self._markers[i].label, screen)
+        # Right-clicking either a primary or an extra row opens the
+        # owning marker's menu — the user should manage the marker as
+        # a whole even from one of its extras.
+        self.show_marker_menu(owner[0], screen)
 
     def show_marker_menu(self, label: str, screen_pos, panel_id: str = "") -> None:
         """
@@ -474,14 +599,52 @@ class MarkerPanel(QGroupBox):
         a_one.setChecked(m.scope == "panel" and m.panel_id == panel_id)
         a_one.triggered.connect(lambda: self._set_scope(m, "panel", panel_id))
 
-        # ------ trace submenu
+        # ------ trace submenu (the marker's primary trace)
         trace_menu = menu.addMenu(f"Trace ({m.trace_name})")
         for n in self.traces.names():
             act = trace_menu.addAction(n)
             act.setCheckable(True); act.setChecked(n == m.trace_name)
             act.triggered.connect(lambda _=False, nn=n, mk=m: self._set_trace(mk, nn))
 
+        # ------ extras submenu — additional traces this marker should
+        #        also read out + drop a dot on at the same frequency.
+        n_extra = len(m.extra_traces)
+        extras_menu = menu.addMenu(
+            f"Also dot/read on traces"
+            + (f" ({n_extra})" if n_extra else "")
+        )
+        names = [n for n in self.traces.names() if n != m.trace_name]
+        if not names:
+            none_act = extras_menu.addAction("(no other traces)")
+            none_act.setEnabled(False)
+        else:
+            for n in names:
+                act = extras_menu.addAction(n)
+                act.setCheckable(True)
+                act.setChecked(n in m.extra_traces)
+                act.triggered.connect(
+                    lambda checked, nn=n, mk=m: self._toggle_extra(mk, nn, checked)
+                )
+
+        # ------ value-on-dot toggle
+        a_vals = menu.addAction("Show values on dots")
+        a_vals.setCheckable(True)
+        a_vals.setChecked(m.show_dot_values)
+        a_vals.triggered.connect(
+            lambda checked, mk=m: self._toggle_dot_values(mk, checked)
+        )
+
         menu.addSeparator()
+
+        # "Set frequency…" works for any marker that holds a user-set freq:
+        # NORMAL is always editable; BW honors `anchor_freq_hz` so the user
+        # can re-anchor an existing BW marker on a different resonance.
+        if m.kind in (MarkerKind.NORMAL, MarkerKind.BW_M10DB):
+            label_freq = ("Set anchor frequency…"
+                          if m.kind == MarkerKind.BW_M10DB
+                          else "Set frequency…")
+            a_freq = menu.addAction(label_freq)
+            a_freq.triggered.connect(lambda: self._edit_freq(m))
 
         a_color = menu.addAction("Change color…")
         a_color.triggered.connect(lambda: self._pick_color(m))
@@ -508,13 +671,58 @@ class MarkerPanel(QGroupBox):
         self._refresh()
 
     def _set_trace(self, m: Marker, n: str) -> None:
-        m.trace_name = n; self._refresh()
+        # Promoting a trace to primary should remove it from extras so we
+        # don't end up with a duplicate dot/row for the same trace.
+        if n in m.extra_traces:
+            m.extra_traces = [t for t in m.extra_traces if t != n]
+        m.trace_name = n
+        self._refresh()
+
+    def _toggle_extra(self, m: Marker, name: str, checked: bool) -> None:
+        if checked:
+            if name not in m.extra_traces and name != m.trace_name:
+                m.extra_traces.append(name)
+        else:
+            m.extra_traces = [t for t in m.extra_traces if t != name]
+        self._refresh()
+
+    def _toggle_dot_values(self, m: Marker, checked: bool) -> None:
+        m.show_dot_values = bool(checked)
+        self._refresh()
 
     def _pick_color(self, m: Marker) -> None:
         c = QColorDialog.getColor(QColor(m.color), self, "Marker color")
         if c.isValid():
             m.color = c.name()
             self._refresh()
+
+    def _edit_freq(self, m: Marker) -> None:
+        # The freq we offer to edit depends on the marker kind: BW markers
+        # carry their resonance anchor separately from `freq_hz` (which the
+        # evaluator overwrites with the band's left edge each sweep).
+        is_bw = m.kind == MarkerKind.BW_M10DB
+        current_hz = (m.anchor_freq_hz if is_bw else m.freq_hz) or m.freq_hz
+        prompt = ("New anchor frequency (locks BW to the resonance near it):"
+                  if is_bw else "New frequency:")
+        new, ok = QInputDialog.getText(
+            self, "Marker frequency", prompt,
+            text=format_freq_input(current_hz),
+        )
+        if not ok:
+            return
+        new_hz = parse_frequency(new, default_unit_hz=1e6)
+        if new_hz is None:
+            QMessageBox.warning(
+                self, "Bad frequency",
+                f"Couldn't parse '{new}'. Use forms like 2.4G, 915M, "
+                "1.575 GHz, or a bare number (taken as MHz)."
+            )
+            return
+        if is_bw:
+            m.anchor_freq_hz = new_hz
+        else:
+            m.freq_hz = new_hz
+        self._refresh()
 
     def _rename(self, m: Marker) -> None:
         new, ok = QInputDialog.getText(self, "Rename marker", "Label:", text=m.label)

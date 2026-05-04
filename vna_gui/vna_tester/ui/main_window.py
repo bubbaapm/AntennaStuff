@@ -31,7 +31,7 @@ from ..paths import (
 )
 from ..plots.export import export_grid_composite, export_panel, export_widget_screenshot
 from ..plots.grid import PlotGrid
-from ..trace import TraceManager, VNA_PARAMS
+from ..trace import TraceAssignment, TraceManager, VNA_PARAMS
 from ..worker import SweepWorker
 
 from .band_presets import BandPresets, BUILTIN_PRESETS
@@ -256,6 +256,7 @@ class MainWindow(QMainWindow):
         # Traces
         self.trace_panel.save_s2p_requested.connect(self._save_s2p)
         self.trace_panel.save_s1p_requested.connect(self._save_s1p)
+        self.trace_panel.references_loaded.connect(self._on_references_loaded)
 
         # Plot grid → markers
         self.plot_grid.marker_placed.connect(self._on_plot_clicked)
@@ -528,6 +529,67 @@ class MainWindow(QMainWindow):
             r["yr_auto"], r["yr_min"], r["yr_max"],
         )
 
+    # ----------------------------------------- references → plot assignments
+    def _on_references_loaded(self, names: list) -> None:
+        """
+        After the user loads a .s1p/.s2p, drop the new reference trace into
+        every plot panel that already shows a trace with the same S-parameter.
+        Mirrors the existing assignment's axis/format so the reference is
+        directly comparable, and renders dashed to distinguish it from the
+        live trace.
+        """
+        if not names:
+            return
+        new_traces = [(n, self.traces.get(n)) for n in names]
+        new_traces = [(n, t) for n, t in new_traces if t is not None]
+        if not new_traces:
+            return
+        added_to: list[str] = []
+        for panel in self.plot_grid.panels():
+            assigns = panel.get_assignments()
+            # Map parameter → first matching assignment, so we can reuse
+            # axis/y_format when adding the reference. Falling back to
+            # `trace_name` covers the no-VNA-connected case: the default
+            # plots ship with assignments named "S11"/"S22" that don't
+            # resolve to a live Trace yet — but the assignment name itself
+            # tells us which S-parameter the panel wants to show.
+            template_for: dict[str, TraceAssignment] = {}
+            for a in assigns:
+                t = self.traces.get(a.trace_name)
+                if t is not None:
+                    param = t.parameter
+                elif a.trace_name in VNA_PARAMS:
+                    param = a.trace_name
+                else:
+                    continue
+                if param in template_for:
+                    continue
+                template_for[param] = a
+            if not template_for:
+                continue
+            new_assigns = list(assigns)
+            for ref_name, ref_t in new_traces:
+                tmpl = template_for.get(ref_t.parameter)
+                if tmpl is None:
+                    continue
+                new_assigns.append(TraceAssignment(
+                    trace_name=ref_name,
+                    visible=True,
+                    axis=tmpl.axis,
+                    y_format=tmpl.y_format,
+                    color_override="",     # inherit reference's gray
+                    line_style="dash",     # visually distinct from live
+                    line_width=tmpl.line_width,
+                    show_dots=False,
+                ))
+            if len(new_assigns) != len(assigns):
+                panel.set_assignments(new_assigns)
+                added_to.append(panel.header_title)
+        if added_to:
+            self.statusBar().showMessage(
+                f"Added reference trace(s) to: {', '.join(added_to)}", 5000
+            )
+
     # ----------------------------------------------------- marker context
     def _on_marker_context(self, label: str, screen_pos, panel) -> None:
         # Surface the marker panel's menu, scoped to the panel that emitted.
@@ -636,19 +698,27 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _refresh_sweep_from_device(self) -> None:
+        # :VNA:CAL:LOAD? returns success the instant the file parses, but
+        # LibreVNA propagates the cal's start/stop/points onto the active
+        # sweep over the next frame. Reading immediately would catch the
+        # old values, so wait a beat first.
+        QTimer.singleShot(350, self._do_refresh_sweep_from_device)
+
+    def _do_refresh_sweep_from_device(self) -> None:
         if not self.controller.connected:
             return
         cfg = self.controller.read_sweep_config()
-        if cfg.points > 0:
-            self.sweep_panel.write_config(cfg)
-            # The cal range may differ from what's on screen — reset views
-            # so the user sees the cal'd band, not the previous one.
-            self._reset_all_plot_views()
-            self.statusBar().showMessage(
-                f"Sweep range pulled from device: "
-                f"{cfg.start_hz/1e6:.2f}–{cfg.stop_hz/1e6:.2f} MHz · {cfg.points} pts",
-                5000,
-            )
+        if cfg.points <= 0:
+            return
+        self.sweep_panel.write_config(cfg)
+        # The cal range may differ from what's on screen — reset views
+        # so the user sees the cal'd band, not the previous one.
+        self._reset_all_plot_views()
+        self.statusBar().showMessage(
+            f"Sweep range pulled from cal: "
+            f"{cfg.start_hz/1e6:.2f}–{cfg.stop_hz/1e6:.2f} MHz · {cfg.points} pts",
+            5000,
+        )
 
     # ============================================================= csv ==
     def _start_csv_log(self) -> None:

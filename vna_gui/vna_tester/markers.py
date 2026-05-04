@@ -8,7 +8,7 @@ the trace data: peak, min, target-value crossing, -10dB bandwidth.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -55,13 +55,25 @@ class Marker:
     panel_id: str = ""           # plot panel id this marker is restricted to (when scope="panel")
     # secondary anchor for delta/BW (left & right edges)
     secondary_freq_hz: float = 0.0
-    # cached readout
+    # For BW_M10DB: when > 0, walk from the resonance nearest this freq
+    # instead of the absolute minimum — lets the user place a BW marker
+    # on each resonance of a multi-band antenna.
+    anchor_freq_hz: float = 0.0
+    # Additional traces that should also get a dot at this marker's
+    # frequency, with their readouts shown in the marker table. The
+    # primary trace (`trace_name`) is always included.
+    extra_traces: List[str] = field(default_factory=list)
+    # When True, each dot the marker draws gets a small value label.
+    show_dot_values: bool = False
+    # cached readout (primary trace)
     last_db: float = 0.0
     last_phase_deg: float = 0.0
     last_real: float = 0.0
     last_imag: float = 0.0
     last_vswr: float = 1.0
     last_z: complex = 0.0 + 0.0j
+    # Per-extra-trace cached readouts: trace_name -> {db, vswr, z}
+    extra_readings: Dict[str, Dict[str, complex]] = field(default_factory=dict)
 
     def evaluate(self, trace: Trace, z0: float = 50.0) -> None:
         """Recompute marker position and cached readouts for given trace."""
@@ -82,13 +94,24 @@ class Marker:
                 idx = int(np.argmin(db))
                 self.freq_hz = float(trace.freq[idx])
         elif self.kind == MarkerKind.BW_M10DB:
-            # Walk left and right from the *minimum* — gives the contiguous
-            # band around the operating resonance, not the convex hull of
-            # every dip in the sweep (which is meaningless for antennas).
+            # Walk left and right from a resonance — gives the contiguous
+            # band around it, not the convex hull of every dip in the sweep
+            # (meaningless for antennas). When `anchor_freq_hz` is set we
+            # snap to the local minimum nearest that anchor so the user can
+            # have one BW marker per resonance on a multi-band antenna;
+            # otherwise we fall back to the absolute minimum.
             db = trace.magnitude_db()
             below = db <= self.target_db
-            if below.any():
-                idx_min = int(np.argmin(db))
+            if self.anchor_freq_hz > 0:
+                i0 = int(np.argmin(np.abs(trace.freq - self.anchor_freq_hz)))
+                idx_min = i0
+                while idx_min > 0 and db[idx_min - 1] < db[idx_min]:
+                    idx_min -= 1
+                while idx_min < db.size - 1 and db[idx_min + 1] < db[idx_min]:
+                    idx_min += 1
+            else:
+                idx_min = int(np.argmin(db)) if db.size else 0
+            if below.any() and below[idx_min]:
                 left = idx_min
                 while left > 0 and below[left - 1]:
                     left -= 1
@@ -98,8 +121,11 @@ class Marker:
                 self.freq_hz = float(trace.freq[left])
                 self.secondary_freq_hz = float(trace.freq[right])
             else:
-                self.freq_hz = float(trace.freq[0])
-                self.secondary_freq_hz = float(trace.freq[0])
+                # Nearest local min didn't reach target dB — collapse to a
+                # zero-width box at the dip so the marker is still visible.
+                f_at = float(trace.freq[idx_min]) if trace.freq.size else 0.0
+                self.freq_hz = f_at
+                self.secondary_freq_hz = f_at
 
         # Snap to closest sample for readouts (avoid interpolation surprises).
         idx = int(np.argmin(np.abs(trace.freq - self.freq_hz)))

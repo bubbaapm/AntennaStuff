@@ -5,3 +5,7 @@ Ablitity to change marker frequency after creating (by typing in number for freq
 Calibration loading should alter windows and points accordingly i.e. 1.5 GHz to 6 GHz and 1001 point calibration sets the start stop from 1.5 GHz to 6 GHz with 1001 points and sets scales in current plots accordingly
 
 ability to expand marker window when it fills up (either get bigger on its own, or ability to drag down to show all desired markers
+
+loading .s1p or .s2p should add the trace to the visible plots when loaded
+
+adding a trace to a graph manually should not reset the zoom of a plot window

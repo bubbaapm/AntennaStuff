@@ -47,6 +47,26 @@ CARTESIAN_FORMATS = (
 )
 
 
+def _format_y_value(y: float, fmt: str) -> str:
+    """Pretty-print a y-value with the unit appropriate to its format,
+    used for the label rendered next to a marker dot."""
+    if fmt in ("dB", "Mismatch loss (dB)"):
+        return f"{y:.2f} dB"
+    if fmt == "Linear |S|":
+        return f"{y:.4f}"
+    if fmt == "VSWR":
+        return f"{y:.2f}"
+    if fmt in ("Phase (°)", "Phase unwrapped (°)"):
+        return f"{y:.1f}°"
+    if fmt == "Group delay (ns)":
+        return f"{y:.2f} ns"
+    if fmt in ("Real", "Imag"):
+        return f"{y:.4f}"
+    if fmt in ("Re(Z) Ω", "Im(Z) Ω", "|Z| Ω"):
+        return f"{y:.1f} Ω"
+    return f"{y:.3g}"
+
+
 def _y_for(trace: Trace, fmt: str, z0: float = 50.0) -> np.ndarray:
     if fmt == "dB":
         return trace.magnitude_db()
@@ -366,10 +386,12 @@ class CartesianPlot(PlotPanel):
             self._applied_axes["yr"] = new_yr
 
     def set_axis_ranges(self, *args, **kwargs) -> None:
-        # Invalidate the applied cache so the next draw re-pushes state.
-        self._applied_axes = {"x": (None, None, None),
-                              "yl": (None, None, None),
-                              "yr": (None, None, None)}
+        # Don't invalidate the applied-state cache here. _apply_axis_ranges
+        # already keys on the actual (auto, min, max) tuple, so it'll push
+        # to pyqtgraph if the values truly changed and skip otherwise. Force-
+        # invalidating would re-call enableAutoRange(True) on the next draw
+        # whenever the user's stored config remained x_auto=True, which
+        # silently wipes out any manual zoom the user had drawn since.
         super().set_axis_ranges(*args, **kwargs)
 
     def reset_view(self) -> None:
@@ -399,11 +421,15 @@ class CartesianPlot(PlotPanel):
                 self.pi.removeItem(self._marker_lines.pop(label))
         for label in list(self._marker_dot_groups.keys()):
             if label not in seen_labels:
-                for host, scatter in self._marker_dot_groups[label]:
-                    try:
-                        host.removeItem(scatter)
-                    except Exception:
-                        pass
+                for entry in self._marker_dot_groups[label]:
+                    host = entry[0]
+                    for artist in entry[1:]:
+                        if artist is None:
+                            continue
+                        try:
+                            host.removeItem(artist)
+                        except Exception:
+                            pass
                 del self._marker_dot_groups[label]
         for label in list(self._region_items.keys()):
             if label not in seen_labels:
@@ -466,20 +492,26 @@ class CartesianPlot(PlotPanel):
         elif m.label in self._marker_lines:
             self.pi.removeItem(self._marker_lines.pop(m.label))
 
-        # Dots — one per visible-trace-this-panel-shows that the line crosses.
-        # That's the whole point of a vertical marker: it tells you what every
-        # trace's value is at that frequency.
+        # Dots — only on the marker's primary trace, plus any extras the
+        # user explicitly opted in. (Previously we dropped a dot on every
+        # crossing, which made marker windows with several traces messy.)
+        # Each entry is (host, scatter, text_or_none).
         old_groups = self._marker_dot_groups.pop(m.label, [])
-        for host, scatter in old_groups:
-            try:
-                host.removeItem(scatter)
-            except Exception:
-                pass
+        for entry in old_groups:
+            host = entry[0]
+            for artist in entry[1:]:
+                if artist is None:
+                    continue
+                try:
+                    host.removeItem(artist)
+                except Exception:
+                    pass
 
         if style in ("point", "both"):
+            wanted = {m.trace_name, *m.extra_traces}
             new_groups: List[tuple] = []
             for a in self._assignments:
-                if not a.visible:
+                if not a.visible or a.trace_name not in wanted:
                     continue
                 t = self.traces.get(a.trace_name)
                 if t is None or t.freq.size == 0 or not t.visible:
@@ -494,7 +526,16 @@ class CartesianPlot(PlotPanel):
                     size=10, symbol="o",
                 )
                 host.addItem(scatter)
-                new_groups.append((host, scatter))
+                text_item = None
+                if m.show_dot_values:
+                    text_item = pg.TextItem(
+                        text=_format_y_value(y_at, a.y_format),
+                        color=QColor(m.color),
+                        anchor=(0, 1),  # bottom-left of text → dot
+                    )
+                    text_item.setPos(float(t.freq[idx]), y_at)
+                    host.addItem(text_item)
+                new_groups.append((host, scatter, text_item))
             if new_groups:
                 self._marker_dot_groups[m.label] = new_groups
 
