@@ -1,0 +1,7 @@
+UID,Timestamp,Antenna,Distance,Angle,LOS,Channel,Signal,Mbps
+833e6e31-13a2-4ea5-bff0-4be374066305,2026-05-04 03:16:33,LuxulAnt,10.0,0.0,Yes,40,91%,359.14
+bca7ffc0-a1de-41d9-9923-85455390fce8,2026-05-04 03:20:32,PatchAnt,10.0,0.0,Yes,40,94%,367.35
+15d8f0b4-c63d-4869-80cc-018f93520e1b,2026-05-04 03:22:33,NetgearAnt,10.0,0.0,Yes,40,94%,351.39
+b3ff9fd8-f54f-4af3-bbf0-82c2ec1ff702,2026-05-04 03:24:28,AmazonAnt,10.0,0.0,Yes,40,90%,366.16
+1d851fc4-4b4d-465b-b4be-9ba8ebf31c55,2026-05-04 03:27:50,AsusAnt,10.0,0.0,Yes,40,86%,341.4
+4571697b-cbd1-4603-9b6d-0e929df2a992,2026-05-04 03:29:55,AmazonMicroStripAnt,10.0,0.0,Yes,40,90%,365.32
