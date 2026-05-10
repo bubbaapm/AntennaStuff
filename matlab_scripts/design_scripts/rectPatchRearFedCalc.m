@@ -2,13 +2,13 @@
 close all; clear; clc;
 
 %% Input Parameters
-% --- Target Specifications ---
-fr = 5.0e9;        % Resonant Frequency (Hz) (i.e. 2.4GHz = 2.4e9)
-er = 4.1;           % Dielectric Constant of the substrate (FR4 ~4.1-4.6)
-Z0 = 50;            % Target characteristic impedance for matching (Ohms)
+% Target Specifications
+fr = 5.5e9;        % Resonant Frequency (Hz) (2.4GHz = 2.4e9)
+er = 4.1;           % Dielectric Constant of substrate (FR4 ~4.1-4.6)
+Z0 = 50;            % Characteristic impedance (Ohms)
 
 % Physical Dimensions (in mm or mils - all must match)
-dielectric_t_input = 1.53;    % Substrate thickness
+dielectric_t_input = 1.51;    % Substrate thickness
 t_top_input = 0.035;            % Top copper thickness
 t_bottom_input = 0.035;        % Bottom copper thickness
 
@@ -20,7 +20,7 @@ Ws_input = 15;  % Width margin (Y-axis)
 er_coax = 2.1;          % PTFE dielectric constant for SMA connector
 pin_dia_input = 1.4859;   % SMA inner pin diameter (match input_unit)
 
-% --- Unit Selection ---
+% Unit Selection
 input_unit = 'mm'; % mm or mils
 c = 2.99792458e8; % Speed of light (m/s)
 

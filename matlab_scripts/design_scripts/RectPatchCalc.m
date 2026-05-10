@@ -3,21 +3,21 @@
 close all; clear; clc;
 
 %% 1. Input Parameters
-% --- Target Specifications ---
-fr = 5.35e9;        % Resonant Frequency (Hz) e.g. 2.4e9 = 2.5 GHz
-er = 4.4;           % Dielectric Constant of the substrate
+% Target Specifications
+fr = 5.5e9;        % Resonant Frequency (Hz) (2.4e9 = 2.4 GHz)
+er = 4.1;           % Dielectric Constant of the substrate
 Z0 = 50;            % Target characteristic impedance for matching (Ohms)
 
-% --- Physical Dimensions ---
-dielectric_t_input = 0.4284;    % Substrate thickness
+% Physical Dimensions
+dielectric_t_input = 1.53;    % Substrate thickness
 t_top_input = 0.035;            % Top copper thickness
-t_bottom_input = 0.0152;        % Bottom copper thickness
+t_bottom_input = 0.035;        % Bottom copper thickness
 
 % Margin: How far the substrate extends past the patch edges
 Ls_input = dielectric_t_input * 6;  % Length margin (X-axis)
 Ws_input = dielectric_t_input * 6;  % Width margin (Y-axis)
 
-% --- Unit Selection ---
+% Unit Selection
 % Enter 'mils' or 'mm' for dimensions above
 input_unit = 'mm';
 calculate_inset_feed = true;  % Set true to calculate the matching cut depth (y0)
@@ -40,7 +40,7 @@ bot_cu_t = t_bottom_input * conv_factor;
 Ls = Ls_input * conv_factor;
 Ws = Ws_input * conv_factor;
 
-%% 3. Core Antenna Dimension Calculations
+%% 3. Antenna Dimension Calculations
 % Standard Patch Width (W)
 W = (c / (2 * fr)) * sqrt(2 / (er + 1));
 

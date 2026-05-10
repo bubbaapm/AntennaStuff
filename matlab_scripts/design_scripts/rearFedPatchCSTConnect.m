@@ -2,8 +2,8 @@
 close all; clear; clc;
 
 %% Input Parameters
-% --- Target Specifications ---
-fr = 5e9;        % Resonant Frequency (Hz) (i.e. 2.4GHz = 2.4e9)
+% Target Specifications
+fr = 5e9;        % Resonant Frequency (Hz) (2.4GHz = 2.4e9)
 er = 4.4;           % Dielectric Constant of the substrate (FR4 ~4.2-4.6)
 Z0 = 50;            % Target characteristic impedance for matching (Ohms)
 
@@ -20,7 +20,7 @@ Ws_input = 15;  % Width margin (Y-axis)
 er_coax = 2.1;          % PTFE dielectric constant for SMA connector
 pin_dia_input = 1.27;   % SMA inner pin diameter (match input_unit)
 
-% --- Unit Selection ---
+% Unit Selection
 input_unit = 'mm'; % mm or mils
 c = 2.99792458e8; % Speed of light (m/s)
 
@@ -122,7 +122,7 @@ invoke(mws, 'Rebuild');
 
 disp('Variables injected. Building 3D Geometry...');
 
-% --- Helper function for VBA formatting ---
+% Helper function for VBA formatting
 n = newline;
 
 vba_Material = [ ...
