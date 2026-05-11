@@ -1,0 +1,5 @@
+# CST files to ignore
+**/model*
+**/modelcache*
+**/result*
+**/Temp*

@@ -28,3 +28,4 @@ vna_tester_config.json
 
 !LibreVNAImages/**/*.png
 !vna_gui/Images/*.png
+!Images/**/*.png

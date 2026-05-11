@@ -1,0 +1,27 @@
+G04 Created with the python gerber_writer 0.4.3.3*
+G04 #@! TF.CreationDate,2026-04-21T18:37:31.305430*
+G04 #@! TF.FileFunction,0*
+G04 #@! TF.FilePolarity,Positive*
+%MOMM*%
+%FSLAX36Y36*%
+G75*
+%LPD*%
+G04 #@! TA.AperFunction,Region (index=0)*
+G36*
+X6150000Y8900000D02*
+G01*
+X-6150000Y8900000D01*
+X-6150000Y-8900000D01*
+X6150000Y-8900000D01*
+X6150000Y8900000D01*
+G37*
+G04 #@! TD*
+%LPC*%
+G04 #@! TA.AperFunction,Region (index=0)*
+G36*
+X3635000Y0D02*
+G02*
+X3635000Y0I-634999J0D01*
+G37*
+G04 #@! TD*
+M02*
