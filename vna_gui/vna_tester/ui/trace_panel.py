@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..paths import app_root
 from ..trace import Trace, TraceManager, VNA_PARAMS
 
 
@@ -114,6 +115,7 @@ class TracePanel(QGroupBox):
     save_s2p_requested = pyqtSignal()
     save_s1p_requested = pyqtSignal()
     references_loaded = pyqtSignal(list)   # list[str] — newly added trace names
+    references_cleared = pyqtSignal(list)  # list[str] — names of refs just removed
 
     def __init__(self, traces: TraceManager, parent=None):
         super().__init__("Traces", parent)
@@ -164,20 +166,24 @@ class TracePanel(QGroupBox):
         # Two compact rows of buttons so nothing overflows.
         compact_btn_qss = "QPushButton { padding: 4px 6px; }"
         row_a = QHBoxLayout()
-        self.btn_load_ref = QPushButton("Load reference…")
+        self.btn_load_ref = QPushButton("Load Touchstone…")
         self.btn_load_ref.setStyleSheet(compact_btn_qss)
         self.btn_load_ref.setToolTip(
             "Import a Touchstone file (.s1p or .s2p) as a static overlay.\n"
-            "References are drawn alongside live traces — handy for "
-            "comparing the current sweep against a saved measurement\n"
+            "Defaults to the project's s1p_s2p_files folder so saved measurements\n"
+            "are one click away. References are drawn alongside live traces —\n"
+            "handy for comparing the current sweep against a saved measurement\n"
             "or a known-good reference board. They never update on their own."
         )
         self.btn_load_ref.clicked.connect(self._load_reference)
         row_a.addWidget(self.btn_load_ref)
         self.btn_clear_ref = QPushButton("Clear refs")
         self.btn_clear_ref.setStyleSheet(compact_btn_qss)
-        self.btn_clear_ref.setToolTip("Remove all reference traces.")
-        self.btn_clear_ref.clicked.connect(self.traces.clear_references)
+        self.btn_clear_ref.setToolTip(
+            "Remove all reference traces — and any plot overlays / markers\n"
+            "attached to them. Asks for confirmation first."
+        )
+        self.btn_clear_ref.clicked.connect(self._clear_refs_with_confirm)
         row_a.addWidget(self.btn_clear_ref)
         v.addLayout(row_a)
 
@@ -257,11 +263,52 @@ class TracePanel(QGroupBox):
         if c.isValid():
             self.traces.set_color(name, c.name())
 
+    def _clear_refs_with_confirm(self) -> None:
+        """Confirmation gate + cascade cleanup. Plots and markers attached
+        to references are also removed (signaled to main window)."""
+        refs = self.traces.references()
+        if not refs:
+            return
+        n = len(refs)
+        ans = QMessageBox.question(
+            self, "Clear references",
+            f"Remove all {n} reference trace{'s' if n != 1 else ''}?\n\n"
+            "Reference plot lines, dots, and any markers attached to them "
+            "will also be removed from every plot.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        names = [t.name for t in refs]
+        self.traces.clear_references()
+        # Tell the main window to prune assignments + markers that point
+        # at these references — the trace manager only owns trace data.
+        self.references_cleared.emit(names)
+
+    def _default_touchstone_dir(self) -> str:
+        """Folder the file dialog should open in — prefer the project's
+        s1p_s2p_files folder so saved sweeps are one click away."""
+        candidates = [
+            app_root() / "s1p_s2p_files",   # vna_gui/s1p_s2p_files
+            app_root().parent / "s1p_s2p_files",  # repo root
+        ]
+        for p in candidates:
+            if p.exists() and p.is_dir():
+                return str(p)
+        # Create the canonical one so it exists for next time.
+        try:
+            target = app_root() / "s1p_s2p_files"
+            target.mkdir(parents=True, exist_ok=True)
+            return str(target)
+        except OSError:
+            return ""
+
     def _load_reference(self) -> None:
         # Multi-select: dropping a folder of antenna captures in at once is
         # the common case. Per-file errors don't abort the rest.
         fns, _ = QFileDialog.getOpenFileNames(
-            self, "Load Touchstone reference(s)", "",
+            self, "Load Touchstone reference(s)", self._default_touchstone_dir(),
             "Touchstone files (*.s1p *.s2p);;All files (*)"
         )
         if not fns:

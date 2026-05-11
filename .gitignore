@@ -2,7 +2,9 @@
 **/__pycache__/
 _screenshots/
 **/_smoketest.py
-*.png
+/dev/*.py
+/dev/preview
+/dev/*.txt
 
 # Virtual environments
 .venv/
@@ -29,3 +31,4 @@ vna_tester_config.json
 !LibreVNAImages/**/*.png
 !vna_gui/Images/*.png
 !Images/**/*.png
+!417517FinalProjectDocs/*

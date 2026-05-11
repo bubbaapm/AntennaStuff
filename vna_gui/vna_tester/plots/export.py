@@ -108,15 +108,24 @@ def export_grid_composite(panels: List[PlotPanel], path: str,
 
 def export_widget_screenshot(widget: QWidget, path: str,
                              upscale: float = 1.0,
+                             target_size: Optional[Tuple[int, int]] = None,
                              fmt: str = "png") -> bool:
     """
-    Plain-widget screenshot at native resolution × `upscale`. Use when
-    the user wants exactly what they see (e.g. for documentation).
+    Plain-widget screenshot. If `target_size` is given, the captured pixmap
+    is scaled (smoothly) so the longer side hits that size while preserving
+    aspect ratio. Otherwise `upscale` multiplies the native pixel size.
 
-    For real high-res, prefer export_grid_composite.
+    Note: this is a true bitmap upscale. The result is sharper than
+    saving at native resolution but won't be as crisp as `export_grid_composite`,
+    which re-renders each plot at the target resolution.
     """
     pix = widget.grab()
-    if upscale != 1.0:
+    if target_size is not None and target_size[0] > 0 and target_size[1] > 0:
+        new_size = QSize(int(target_size[0]), int(target_size[1]))
+        pix = pix.scaled(new_size,
+                         Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    elif upscale != 1.0:
         new_size = QSize(int(pix.width() * upscale), int(pix.height() * upscale))
         pix = pix.scaled(new_size,
                          Qt.AspectRatioMode.KeepAspectRatio,

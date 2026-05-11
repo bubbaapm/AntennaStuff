@@ -364,7 +364,12 @@ class CalibrationDialog(QDialog):
             self.lbl_status.setStyleSheet("color:#ff5252;")
 
     def _load(self) -> None:
-        fn, _ = QFileDialog.getOpenFileName(self, "Load calibration", "",
+        # Default to the project's cals/ folder so the user doesn't have to
+        # dig through the file system every time. Falls back to home if the
+        # folder hasn't been created yet.
+        cals_dir = Path(__file__).resolve().parents[2] / "cals"
+        default_dir = str(cals_dir if cals_dir.exists() else Path.home())
+        fn, _ = QFileDialog.getOpenFileName(self, "Load calibration", default_dir,
                                             "LibreVNA calibration (*.cal);;All files (*)")
         if fn:
             ok = self.controller.cal_load(fn)
