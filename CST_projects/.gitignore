@@ -3,3 +3,6 @@
 **/modelcache*
 **/result*
 **/Temp*
+
+!**/Export/
+!**/Export/**/*.png
