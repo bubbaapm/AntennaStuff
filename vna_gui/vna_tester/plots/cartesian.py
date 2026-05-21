@@ -307,7 +307,7 @@ class CartesianPlot(PlotPanel):
             curve = self._curves_left.get(key)
             if curve is None:
                 continue
-            label = f"{a.trace_name} · {a.y_format} (L)"
+            label = f"{a.trace_name} · {a.y_format}"
             rows.append((key, label, curve, a.color_for(t), a.line_style, a.line_width))
         for a in right_assigns:
             t = self.traces.get(a.trace_name)
@@ -317,7 +317,7 @@ class CartesianPlot(PlotPanel):
             curve = self._curves_right.get(key)
             if curve is None:
                 continue
-            label = f"{a.trace_name} · {a.y_format} (R)"
+            label = f"{a.trace_name} · {a.y_format}"
             rows.append((key, label, curve, a.color_for(t), a.line_style, a.line_width))
 
         sig = ";".join(f"{k}|{lbl}|{c}|{s}|{w}" for k, lbl, _, c, s, w in rows)
@@ -528,11 +528,25 @@ class CartesianPlot(PlotPanel):
                 host.addItem(scatter)
                 text_item = None
                 if m.show_dot_values:
+                    # Background fill + matching-color border so the readout
+                    # stays legible when the trace passes behind it or other
+                    # markers' values sit nearby.
                     text_item = pg.TextItem(
                         text=_format_y_value(y_at, a.y_format),
-                        color=QColor(m.color),
+                        color=QColor("#ffffff"),
                         anchor=(0, 1),  # bottom-left of text → dot
+                        fill=pg.mkBrush(15, 15, 15, 220),
+                        border=pg.mkPen(QColor(m.color), width=1),
                     )
+                    # Slightly bolder font so values pop against the lines.
+                    try:
+                        from PyQt6.QtGui import QFont
+                        f = QFont()
+                        f.setPointSize(9)
+                        f.setBold(True)
+                        text_item.setFont(f)
+                    except Exception:
+                        pass
                     text_item.setPos(float(t.freq[idx]), y_at)
                     host.addItem(text_item)
                 new_groups.append((host, scatter, text_item))
@@ -642,20 +656,74 @@ class CartesianPlot(PlotPanel):
             from pyqtgraph.exporters import ImageExporter, SVGExporter
         except Exception:
             return False
-        if fmt.lower() == "svg":
-            exp = SVGExporter(self.pi)
-        else:
-            exp = ImageExporter(self.pi)
-            exp.parameters()["width"] = int(width_px)
+        # pyqtgraph exporters render at the *current* on-screen pixel size
+        # for fonts and pen widths — so legend text and tick labels look
+        # tiny when the output is much larger than the widget. Scale fonts
+        # up by the export-vs-screen ratio so a 4K export looks like a 4K
+        # screenshot, not a 1080p one stretched.
+        on_w = max(1, int(self.pi.vb.sceneBoundingRect().width() or self.pw.width()))
+        scale = max(1.0, float(width_px) / float(on_w))
+
+        prev_legend_font = None
+        prev_axis_fonts = {}
+        try:
+            from PyQt6.QtGui import QFont
+            # Boost legend font.
             try:
-                exp.parameters()["height"] = int(height_px)
+                if self._legend is not None:
+                    for sample, label in list(self._legend.items):
+                        f = label.item.font()
+                        prev_legend_font = QFont(f)
+                        scaled = QFont(f)
+                        scaled.setPointSizeF(max(8.0, f.pointSizeF() * scale * 0.85))
+                        label.item.setFont(scaled)
             except Exception:
                 pass
-        try:
-            exp.export(path)
-            return True
-        except Exception:
-            return False
+            # Boost axis tick / label fonts.
+            for axname in ("left", "right", "bottom", "top"):
+                ax = self.pi.getAxis(axname)
+                if ax is None:
+                    continue
+                try:
+                    cur = ax.style.get("tickFont") or QFont()
+                    prev_axis_fonts[axname] = cur
+                    scaled = QFont(cur)
+                    base = cur.pointSizeF() if cur.pointSizeF() > 0 else 9.0
+                    scaled.setPointSizeF(max(8.0, base * scale * 0.85))
+                    ax.setStyle(tickFont=scaled)
+                except Exception:
+                    pass
+
+            if fmt.lower() == "svg":
+                exp = SVGExporter(self.pi)
+            else:
+                exp = ImageExporter(self.pi)
+                exp.parameters()["width"] = int(width_px)
+                try:
+                    exp.parameters()["height"] = int(height_px)
+                except Exception:
+                    pass
+            try:
+                exp.export(path)
+                return True
+            except Exception:
+                return False
+        finally:
+            # Restore on-screen fonts so the live plot doesn't end up huge.
+            try:
+                if prev_legend_font is not None and self._legend is not None:
+                    for sample, label in list(self._legend.items):
+                        label.item.setFont(prev_legend_font)
+            except Exception:
+                pass
+            for axname, font in prev_axis_fonts.items():
+                ax = self.pi.getAxis(axname)
+                if ax is None:
+                    continue
+                try:
+                    ax.setStyle(tickFont=font)
+                except Exception:
+                    pass
 
 
 register_plot("cartesian")

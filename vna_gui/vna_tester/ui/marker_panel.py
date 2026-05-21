@@ -618,6 +618,18 @@ class MarkerPanel(QGroupBox):
             none_act = extras_menu.addAction("(no other traces)")
             none_act.setEnabled(False)
         else:
+            # Bulk-toggle helpers — much friendlier than clicking each row
+            # when ten reference traces are loaded.
+            a_all = extras_menu.addAction("Select all")
+            a_all.triggered.connect(
+                lambda _=False, mk=m, ns=list(names): self._set_all_extras(mk, ns)
+            )
+            a_none = extras_menu.addAction("Clear all")
+            a_none.setEnabled(bool(m.extra_traces))
+            a_none.triggered.connect(
+                lambda _=False, mk=m: self._clear_all_extras(mk)
+            )
+            extras_menu.addSeparator()
             for n in names:
                 act = extras_menu.addAction(n)
                 act.setCheckable(True)
@@ -684,6 +696,14 @@ class MarkerPanel(QGroupBox):
                 m.extra_traces.append(name)
         else:
             m.extra_traces = [t for t in m.extra_traces if t != name]
+        self._refresh()
+
+    def _set_all_extras(self, m: Marker, names: List[str]) -> None:
+        m.extra_traces = [n for n in names if n != m.trace_name]
+        self._refresh()
+
+    def _clear_all_extras(self, m: Marker) -> None:
+        m.extra_traces = []
         self._refresh()
 
     def _toggle_dot_values(self, m: Marker, checked: bool) -> None:

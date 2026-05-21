@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         a_save_s1p.triggered.connect(self._save_s1p)
         f.addAction(a_save_s1p)
 
-        a_load_ref = QAction("Load reference (.s1p / .s2p)…", self)
+        a_load_ref = QAction("Load Touchstone (.s1p / .s2p)…", self)
         a_load_ref.triggered.connect(self.trace_panel._load_reference)
         f.addAction(a_load_ref)
 
@@ -257,6 +257,7 @@ class MainWindow(QMainWindow):
         self.trace_panel.save_s2p_requested.connect(self._save_s2p)
         self.trace_panel.save_s1p_requested.connect(self._save_s1p)
         self.trace_panel.references_loaded.connect(self._on_references_loaded)
+        self.trace_panel.references_cleared.connect(self._on_references_cleared)
 
         # Plot grid → markers
         self.plot_grid.marker_placed.connect(self._on_plot_clicked)
@@ -353,24 +354,47 @@ class MainWindow(QMainWindow):
 
     # ========================================================== sweep ==
     def _on_sweep_changed(self, cfg: SweepConfig) -> None:
+        # Always clamp X to the sweep range, even when no VNA is connected.
+        # Otherwise loaded references (which usually span a wider band) keep
+        # the plot zoomed out to their full range while the live trace only
+        # covers the new sweep — exactly the "weird zoomed-out look" we want
+        # to avoid.
+        self._reset_all_plot_views(sweep_x_range=(cfg.start_hz, cfg.stop_hz))
         if not self.controller.connected:
             return
         self.controller.apply_sweep(cfg)
         self.cfg["last_sweep"] = cfg.__dict__
         save_config(self.cfg)
-        # New sweep range → reset every plot's view so the plot zooms to
-        # whatever was just configured, instead of staying at the old span.
-        self._reset_all_plot_views()
         self.statusBar().showMessage(
             f"Applied: {cfg.start_hz/1e6:.2f}–{cfg.stop_hz/1e6:.2f} MHz · "
             f"{cfg.points} pts · IFBW {cfg.ifbw_hz:g} Hz · avg {cfg.averaging}",
             5000,
         )
 
-    def _reset_all_plot_views(self) -> None:
+    def _reset_all_plot_views(self, sweep_x_range: Optional[tuple] = None) -> None:
         for p in self.plot_grid.panels():
             try:
-                p.reset_view()
+                # Only cartesian plots use frequency on the X axis. For Smith
+                # / polar / TDR a sweep-range clamp is meaningless, so we just
+                # autorange them. For cartesian, we clamp X to the sweep range
+                # (and autorange Y) so loaded references don't expand the
+                # view past the active band.
+                if sweep_x_range is not None and getattr(p, "KIND", "") == "cartesian":
+                    lo, hi = sweep_x_range
+                    # Invalidate the cached applied state so set_axis_ranges
+                    # actually pushes through to pyqtgraph even if Y was
+                    # already in autorange mode.
+                    if hasattr(p, "_applied_axes"):
+                        p._applied_axes = {"x": (None, None, None),
+                                           "yl": (None, None, None),
+                                           "yr": (None, None, None)}
+                    p.set_axis_ranges(
+                        x_auto=False, x_min=float(lo), x_max=float(hi),
+                        yl_auto=True, yl_min=p.yl_min, yl_max=p.yl_max,
+                        yr_auto=True, yr_min=p.yr_min, yr_max=p.yr_max,
+                    )
+                else:
+                    p.reset_view()
             except Exception:
                 pass
 
@@ -590,6 +614,41 @@ class MainWindow(QMainWindow):
                 f"Added reference trace(s) to: {', '.join(added_to)}", 5000
             )
 
+    def _on_references_cleared(self, names: list) -> None:
+        """User cleared all reference traces — prune any plot assignments
+        and markers that pointed at them so the UI doesn't carry orphan
+        rows around. Live traces and their markers are untouched."""
+        if not names:
+            return
+        dropped = set(names)
+        # Strip dropped names from each panel's assignment list.
+        for panel in self.plot_grid.panels():
+            assigns = panel.get_assignments()
+            keep = [a for a in assigns if a.trace_name not in dropped]
+            if len(keep) != len(assigns):
+                panel.set_assignments(keep)
+        # Drop primary-on-ref markers entirely; strip dropped names from
+        # the extras list of any other markers.
+        markers = self.marker_panel.markers()
+        survivors = []
+        changed = False
+        for m in markers:
+            if m.trace_name in dropped:
+                changed = True
+                continue
+            new_extras = [n for n in m.extra_traces if n not in dropped]
+            if len(new_extras) != len(m.extra_traces):
+                m.extra_traces = new_extras
+                changed = True
+            survivors.append(m)
+        if changed:
+            self.marker_panel._markers = survivors
+            self.marker_panel._refresh()
+        self.statusBar().showMessage(
+            f"Removed {len(dropped)} reference trace(s) and cleared their plot/marker overlays.",
+            5000,
+        )
+
     # ----------------------------------------------------- marker context
     def _on_marker_context(self, label: str, screen_pos, panel) -> None:
         # Surface the marker panel's menu, scoped to the panel that emitted.
@@ -627,7 +686,11 @@ class MainWindow(QMainWindow):
                 title=self.windowTitle(), fmt=fmt,
             )
         else:  # screenshot
-            ok = export_widget_screenshot(self, path, upscale=1.0, fmt=fmt)
+            # Honor the chosen resolution by upscaling the grab to match it.
+            # This is a bitmap upscale (not a re-render) so it won't be as
+            # crisp as 'whole window', but it does fulfill the user's
+            # expectation that selecting 4K produces a 4K-sized file.
+            ok = export_widget_screenshot(self, path, target_size=size, fmt=fmt)
         msg = f"Exported: {path}" if ok else f"Failed to export: {path}"
         self.statusBar().showMessage(msg, 6000)
         if ok:

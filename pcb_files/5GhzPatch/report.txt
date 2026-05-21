@@ -1,0 +1,9 @@
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-F_Cu.gtl'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-B_Cu.gbl'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-F_Silkscreen.gto'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-B_Silkscreen.gbo'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-F_Mask.gts'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-B_Mask.gbs'.
+Plotted to 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-Edge_Cuts.gm1'.
+Created Gerber job file 'D:\KiCad_Projects\5GhzPatch\gerbers\5GhzPatch-job.gbrjob'.
+Info: Done.

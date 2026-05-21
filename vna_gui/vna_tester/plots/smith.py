@@ -213,6 +213,11 @@ class SmithPlot(PlotPanel):
         target_dpi = 200
         w_in = max(1.0, width_px / target_dpi)
         h_in = max(1.0, height_px / target_dpi)
+        # Save the on-screen figure size so we can restore it after export —
+        # otherwise the canvas widget shrinks to whatever inches we just
+        # asked for and the plot won't fill its panel until it's removed
+        # and re-added.
+        prev_size = tuple(self.fig.get_size_inches())
         self.fig.set_size_inches(w_in, h_in)
         try:
             self.fig.savefig(path, dpi=target_dpi, facecolor="#1d1d1d",
@@ -221,6 +226,17 @@ class SmithPlot(PlotPanel):
         except Exception:
             return False
         finally:
+            # Restore the on-screen size and let Qt re-resize the canvas
+            # to fill its parent. set_size_inches alone doesn't trigger
+            # the resize event the FigureCanvas needs to relayout.
+            self.fig.set_size_inches(*prev_size)
+            try:
+                w = self.canvas.width()
+                h = self.canvas.height()
+                self.canvas.resize(w + 1, h)
+                self.canvas.resize(w, h)
+            except Exception:
+                pass
             self.canvas.draw_idle()
 
 

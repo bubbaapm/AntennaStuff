@@ -56,26 +56,10 @@ class ExportDialog(QDialog):
         gb_what = QGroupBox("What to export")
         gv = QVBoxLayout(gb_what)
         self.rb_panel = QRadioButton("A single plot panel")
-        self.rb_window = QRadioButton("Whole window (high-res composite)")
-        self.rb_window.setToolTip(
-            "Re-renders each plot at high resolution, then composites them in their\n"
-            "current grid position. Output is sharp at any chosen resolution."
-        )
-        self.rb_screenshot = QRadioButton("Plain screenshot (what you see)")
-        self.rb_screenshot.setToolTip(
-            "Grabs the window pixels at native resolution.\n"
-            "Use only when you want the screen exactly as it is — output won't scale up sharply."
-        )
-        self.rb_window.setChecked(True)
-        self.bg = QButtonGroup(self)
-        self.bg.addButton(self.rb_panel)
-        self.bg.addButton(self.rb_window)
-        self.bg.addButton(self.rb_screenshot)
         gv.addWidget(self.rb_panel)
-        gv.addWidget(self.rb_window)
-        gv.addWidget(self.rb_screenshot)
 
-        # Panel selector (active when rb_panel selected)
+        # Panel selector goes directly under its radio button so the user
+        # sees them grouped. Disabled until "A single plot panel" is chosen.
         sub = QHBoxLayout()
         sub.addWidget(QLabel("    Plot:"))
         self.cb_panel = QComboBox()
@@ -83,6 +67,27 @@ class ExportDialog(QDialog):
         self.cb_panel.setEnabled(False)
         sub.addWidget(self.cb_panel, 1)
         gv.addLayout(sub)
+
+        self.rb_window = QRadioButton("Whole window (high-res composite)")
+        self.rb_window.setToolTip(
+            "Re-renders each plot at high resolution, then composites them in their\n"
+            "current grid position. Output is sharp at any chosen resolution."
+        )
+        gv.addWidget(self.rb_window)
+
+        self.rb_screenshot = QRadioButton("Plain screenshot (upscaled)")
+        self.rb_screenshot.setToolTip(
+            "Grabs the window pixels and bitmap-scales to the chosen resolution.\n"
+            "Faster than 'Whole window' but slightly less crisp — text and lines\n"
+            "are stretched, not re-rendered."
+        )
+        gv.addWidget(self.rb_screenshot)
+
+        self.rb_window.setChecked(True)
+        self.bg = QButtonGroup(self)
+        self.bg.addButton(self.rb_panel)
+        self.bg.addButton(self.rb_window)
+        self.bg.addButton(self.rb_screenshot)
         self.rb_panel.toggled.connect(lambda on: self.cb_panel.setEnabled(on))
         v.addWidget(gb_what)
 

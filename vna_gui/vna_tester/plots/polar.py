@@ -168,6 +168,9 @@ class PolarPlot(PlotPanel):
         target_dpi = 200
         w_in = max(1.0, width_px / target_dpi)
         h_in = max(1.0, height_px / target_dpi)
+        # Save & restore on-screen figure size — without this, exporting
+        # at a non-square resolution permanently shrinks the live plot.
+        prev_size = tuple(self.fig.get_size_inches())
         self.fig.set_size_inches(w_in, h_in)
         try:
             self.fig.savefig(path, dpi=target_dpi, facecolor="#1d1d1d",
@@ -176,6 +179,14 @@ class PolarPlot(PlotPanel):
         except Exception:
             return False
         finally:
+            self.fig.set_size_inches(*prev_size)
+            try:
+                w = self.canvas.width()
+                h = self.canvas.height()
+                self.canvas.resize(w + 1, h)
+                self.canvas.resize(w, h)
+            except Exception:
+                pass
             self.canvas.draw_idle()
 
 

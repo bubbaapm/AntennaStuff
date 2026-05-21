@@ -142,13 +142,23 @@ class PlotPanel(QWidget):
         """
         Title derived from the active assignments — e.g. "S11 (Cartesian)"
         or "S11, S22 (Smith Chart)". Falls back to the bare plot kind when
-        nothing is assigned. Used as the default header when the user
-        hasn't typed a custom title in the configure dialog.
+        nothing is assigned.
+
+        Only LIVE trace names are listed. Reference traces are excluded so
+        loading ten .s2p files doesn't produce a 200-character header that
+        forces the window wider than the screen (and they're already
+        identified in the legend below).
         """
         seen: set[str] = set()
         params: List[str] = []
         for a in self._assignments:
             if a.trace_name in seen:
+                continue
+            t = self.traces.get(a.trace_name)
+            # Skip references entirely; only count live traces (or
+            # unresolved S-param names like "S11" which we treat as live
+            # placeholders before a sweep arrives).
+            if t is not None and t.is_reference:
                 continue
             seen.add(a.trace_name)
             params.append(a.trace_name)
