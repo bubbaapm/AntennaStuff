@@ -50,18 +50,6 @@ def analyze(w: float, er: float, h: float) -> dict:
     return {"Ereff": ereff, "Z0": z0, "W_h": u}
 
 
-def effective_permittivity_dispersion(ereff_dc: float, er: float, z0_dc: float,
-                                      h: float, freq: float) -> float:
-    """Kirschning-Jansen frequency-dependent εr_eff."""
-    fn = freq * h / 1e6  # h in meters * Hz → MHz·m then scale? actually normalized
-    # Use the classical Getsinger:
-    #   εr_eff(f) = εr - (εr - εr_eff_dc) / (1 + G (f/fT)^2)
-    # where fT = z0 / (2 μ0 h), G ≈ 0.6 + 0.009 z0
-    fT = z0_dc / (2 * 4e-7 * np.pi * h)
-    G = 0.6 + 0.009 * z0_dc
-    return er - (er - ereff_dc) / (1 + G * (freq / fT) ** 2)
-
-
 def attenuation_db_per_m(w: float, h: float, er: float, tan_d: float,
                          freq: float, sigma: float = 5.8e7) -> dict:
     """Conductor + dielectric loss. Returns dict with alpha_c, alpha_d, alpha."""

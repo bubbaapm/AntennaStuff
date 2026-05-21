@@ -233,6 +233,26 @@ def angle_dim(ax, vertex, p1, p2, text, *, radius=None, color=None,
             zorder=z + 1)
 
 
+def dim_board(ax, x0, x1, y0, y1, *,
+              label_l="Board L", label_w="Board W",
+              pad_frac=0.16, color=None):
+    """Draw 'Board L' / 'Board W' dimensions outside the rectangle (x0..x1, y0..y1).
+
+    Pushed `pad_frac` of max(W,L) further out than the rectangle edge so the
+    annotation sits well clear of any inner-feature dimensions. Always uses the
+    magenta `dim_special` colour by default so the overall envelope visually
+    contrasts with per-feature dims.
+    """
+    color = color or LAYER_COLORS.get("dim_special", "#ff7ab6")
+    W = x1 - x0
+    H = y1 - y0
+    pad = pad_frac * max(W, H)
+    dim_horizontal(ax, x0, x1, y0 - pad,
+                   f"{label_l} = {W:.2f}", offset=0, color=color)
+    dim_vertical(ax, y0, y1, x0 - pad,
+                 f"{label_w} = {H:.2f}", offset=0, color=color)
+
+
 def add_scale_bar(ax, length: float, label: str, *, loc: str = "lower right",
                   color: str = None):
     """Small scale bar in the axes corner."""

@@ -6,11 +6,11 @@ import numpy as np
 from matplotlib import patches as mpatches
 from matplotlib.path import Path as MPath
 
-from .base import AntennaBase, Context, Input, register_antenna, C_LIGHT, ETA0
+from .base import AntennaBase, Context, Input, Curve, register_antenna, C_LIGHT, ETA0
 from calculators import microstrip
 from plotting.cad import (
     LAYER_COLORS, style_ax, dim_horizontal, dim_vertical, dim_linear,
-    angle_dim, leader, add_layer_legend,
+    angle_dim, leader, add_layer_legend, dim_board,
 )
 
 
@@ -21,6 +21,9 @@ from plotting.cad import (
 @register_antenna("Rectangular Slot", category="Aperture")
 class RectangularSlot(AntennaBase):
     notes = "Booker's complementary relation: Z_slot · Z_dipole = η₀²/4."
+    polarization = "linear  (E perpendicular to slot long axis)"
+    beam_axis = "bidirectional, broadside (±Z to the ground plane)"
+    bandwidth_note = "narrowband (~5 %), set by slot length"
 
     def inputs(self):
         return [
@@ -28,7 +31,7 @@ class RectangularSlot(AntennaBase):
         ]
 
     def compute(self, ctx, params):
-        W = float(params.get("slot_W", "2.0")) * 1e-3
+        W = ctx.m(params.get("slot_W", "2.0"))
         # Slot resonance ≈ λ/2 in effective medium (air + substrate)
         ereff = (ctx.er + 1) / 2
         L = 0.5 * C_LIGHT / (ctx.fr * np.sqrt(ereff))
@@ -40,7 +43,8 @@ class RectangularSlot(AntennaBase):
                  if ctx.z0 < Z_slot else 0.0
         feed = microstrip.synthesize(ctx.z0, ctx.er, ctx.h)
         return {"L": L, "W": W, "Z_slot": Z_slot, "offset": offset,
-                "W_feed": feed["W"], "Ereff": ereff}
+                "W_feed": feed["W"], "Ereff": ereff,
+                "board_size": (L + 2 * ctx.Ls, W + 2 * ctx.Ws)}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str
@@ -70,16 +74,22 @@ class RectangularSlot(AntennaBase):
         ax.add_patch(mpatches.Rectangle(
             (off - wf/2, -W/2 - Ws), wf, W + 2*Ws,
             linestyle="--", edgecolor="cyan", fill=False, lw=1.2, zorder=3))
-        dim_horizontal(ax, -L/2, L/2, W/2 + Ws*0.4, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.4, f"W = {W:.2f}", offset=0)
-        dim_horizontal(ax, 0, off, -W/2 - Ws*0.1, f"offset = {off:.2f}",
+        dim_horizontal(ax, -L/2, L/2, W/2 + Ws*0.3, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.3, f"W = {W:.2f}", offset=0)
+        # offset dim parked below the slot in the open ground area so it
+        # isn't drawn on top of the dashed feed trace.
+        dim_horizontal(ax, 0, off, -W/2 - Ws*0.45, f"offset = {off:.2f}",
                        offset=0, color=LAYER_COLORS["dim_alt"])
+
+        dim_board(ax, -L/2 - Ls, L/2 + Ls, -W/2 - Ws, W/2 + Ws,
+                  pad_frac=0.10)
+
         add_layer_legend(ax, [
             (LAYER_COLORS["copper"], "Ground plane"),
             (LAYER_COLORS["substrate"], "Slot aperture"),
             ("cyan", "Feed (opposite side)"),
         ], loc="upper right")
-        ax.margins(0.12)
+        ax.margins(0.18)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "Slot — Magnetic Current |M|", equal=True, grid=False)
@@ -112,6 +122,9 @@ class RectangularSlot(AntennaBase):
 @register_antenna("Bowtie (Planar)", category="Aperture")
 class Bowtie(AntennaBase):
     notes = "Flare angle trades bandwidth ↔ gain. 60° is a balanced starting point."
+    polarization = "linear  (E along the flare tip-to-tip axis)"
+    beam_axis = "broadside ±Z (bidirectional)"
+    bandwidth_note = "wideband (~50 % or more depending on flare)"
 
     def inputs(self):
         return [Input("flare_deg", "Flare angle (°)", "60")]
@@ -124,7 +137,28 @@ class Bowtie(AntennaBase):
         # For α = flare half-angle, Z ≈ 120 · ln(cot(α/2))  ohms (infinite bowtie)
         alpha = np.radians(flare) / 2
         Z_in = 120 * np.log(1 / np.tan(alpha / 2)) if alpha > 0 else np.nan
-        return {"L": L, "W": W, "flare": flare, "Z_in": Z_in}
+        # Triangles as parametric curves for export
+        tri_left  = [(-L/2,  W/2), (0.0, 0.0), (-L/2, -W/2), (-L/2,  W/2)]
+        tri_right = [( L/2,  W/2), (0.0, 0.0), ( L/2, -W/2), ( L/2,  W/2)]
+        curves = [
+            Curve(name="Left triangle (apex at origin)",
+                  equation="vertices: (−L/2, ±W/2) and (0, 0)",
+                  parameters={"L": (L, "m"), "W": (W, "m")},
+                  points_m=tri_left, closed=True),
+            Curve(name="Right triangle (apex at origin)",
+                  equation="vertices: (+L/2, ±W/2) and (0, 0)",
+                  parameters={"L": (L, "m"), "W": (W, "m")},
+                  points_m=tri_right, closed=True),
+        ]
+        bw = {
+            "f_low_hz": ctx.fr * 0.7,
+            "f_high_hz": ctx.fr * 1.5,
+            "fractional": 0.8 / 1.1,
+            "note": f"Wideband — wider flare gives more BW (flare={flare:.0f}°).",
+        }
+        return {"L": L, "W": W, "flare": flare, "Z_in": Z_in,
+                "board_size": (L + 2 * ctx.Ls, W + 2 * ctx.Ws),
+                "curves": curves, "bandwidth": bw}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str
@@ -151,16 +185,20 @@ class Bowtie(AntennaBase):
                                        facecolor=LAYER_COLORS["copper"],
                                        edgecolor=LAYER_COLORS["copper_edge"], zorder=2))
         ax.plot([0], [0], "o", color="red", markersize=5, zorder=5)
-        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.4, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -W/2, W/2, L/2 + Ls*0.4, f"W = {W:.2f}", offset=0)
+        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.3, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax, -W/2, W/2, L/2 + Ls*0.25, f"W = {W:.2f}", offset=0)
         angle_dim(ax, (0, 0), (L/2, W/2), (L/2, -W/2),
                   f"{r['flare']:.0f}°",
                   radius=L * 0.18, color=LAYER_COLORS["dim_special"])
+
+        dim_board(ax, -L/2 - Ls, L/2 + Ls, -W/2 - Ws, W/2 + Ws,
+                  pad_frac=0.10)
+
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], "Substrate"),
             (LAYER_COLORS["copper"], "Copper"),
         ], loc="lower left")
-        ax.margins(0.1)
+        ax.margins(0.16)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "Bowtie Surface Current", equal=True, grid=False)
@@ -207,6 +245,9 @@ class Vivaldi(AntennaBase):
         "only to size the microstrip/balun; the radiator's bandwidth is set by "
         "f_low / f_high and the physical taper length."
     )
+    polarization = "linear  (E across the slot, vertical when board is horizontal)"
+    beam_axis = "end-fire along +X (taper opens toward +X)"
+    bandwidth_note = "wideband (multi-octave)"
 
     def inputs(self):
         return [
@@ -226,7 +267,8 @@ class Vivaldi(AntennaBase):
                   tooltip="¼ λ_g microstrip stub — classic virtual short."),
             Input("stub_angle", "Radial-stub sector half-angle (deg)", "45"),
             Input("feed_Z",     "Feed microstrip Z₀ (Ω)", "50"),
-            Input("feed_side",  "SMA connector side (left / bottom)", "left",
+            Input("feed_side",  "SMA connector side", "left",
+                  choices=["left", "bottom"],
                   tooltip="Board edge the SMA sits on. 'left' = same side as the "
                           "cavity; microstrip L-turns on the bottom layer to "
                           "cross the slot perpendicular."),
@@ -234,26 +276,18 @@ class Vivaldi(AntennaBase):
             Input("margin_side","Board margin beside taper", "4.0", unit="units"),
         ]
 
-    @staticmethod
-    def _to_m(s, default_m):
-        try:
-            v = float(s)
-        except (TypeError, ValueError):
-            return default_m
-        return default_m if v <= 0 else v * 1e-3
-
     def compute(self, ctx, params):
         fL = float(params.get("f_low_GHz",  "2.0")) * 1e9
         fH = float(params.get("f_high_GHz", "10.0")) * 1e9
         if fH <= fL:
             fH = fL * 2
 
-        L = float(params.get("length", "80.0")) * 1e-3          # taper length
+        L = ctx.m(params.get("length", "80.0"))                 # taper length
         # Auto defaults: W_ap = λ_low/2, w0 = λ_high/30
         W_ap_default = 0.5 * C_LIGHT / fL
         w0_default   = (C_LIGHT / fH) / 30.0
-        W_ap = self._to_m(params.get("W_ap"), W_ap_default)
-        w0   = self._to_m(params.get("w0"),   w0_default)
+        W_ap = ctx.m_or(params.get("W_ap"), W_ap_default)
+        w0   = ctx.m_or(params.get("w0"),   w0_default)
         if w0 >= W_ap:
             w0 = W_ap * 0.05
 
@@ -272,8 +306,8 @@ class Vivaldi(AntennaBase):
         # maximizes bandwidth of the balun.
         feed_cross_x = lam_g_slot_at_fr / 4
 
-        cavity_dia = self._to_m(params.get("cavity_dia"),
-                                lam_g_slot_at_fL / 3)
+        cavity_dia = ctx.m_or(params.get("cavity_dia"),
+                              lam_g_slot_at_fL / 3)
         stub_ratio = float(params.get("stub_ratio", "0.25"))
         stub_angle = float(params.get("stub_angle", "45"))
         stub_len   = stub_ratio * lam_g_strip
@@ -281,8 +315,37 @@ class Vivaldi(AntennaBase):
         feed_side  = str(params.get("feed_side", "left")).strip().lower()
         if feed_side not in ("left", "bottom"):
             feed_side = "left"
-        m_back     = float(params.get("margin_back", "4.0")) * 1e-3
-        m_side     = float(params.get("margin_side", "4.0")) * 1e-3
+        m_back     = ctx.m(params.get("margin_back", "4.0"))
+        m_side     = ctx.m(params.get("margin_side", "4.0"))
+
+        # Cavity centre. Original code placed the cavity tangent to x=0 at
+        # the origin, which leaves a small disconnect between the cavity
+        # circle and the throat (the slot opens to (0, ±w0/2) but the
+        # cavity only touches (0, 0)). Shifting cav_cx so the cavity passes
+        # EXACTLY through (0, ±w0/2) makes the etched slot+cavity a single
+        # continuous opening — no gap, no overlap.
+        cav_r = 0.5 * cavity_dia
+        if cav_r > w0 / 2:
+            cav_cx_offset = float(np.sqrt(cav_r ** 2 - (w0 / 2) ** 2))
+        else:
+            cav_cx_offset = cav_r
+        cav_cx = -cav_cx_offset                        # cavity centre x (m)
+        # Board footprint (cavity leftmost point sits at cav_cx − cav_r)
+        cav_left = cav_cx - cav_r
+        board_len = L - cav_left + m_back              # x extent
+        board_wid = W_ap + 2 * m_side                  # y extent
+
+        # Slotline width where the microstrip crosses it — needed (together
+        # with the microstrip width) to design the microstrip-to-slotline
+        # balun. The slot follows the exponential taper, capped at the mouth.
+        slot_w_feed = min(w0 * np.exp(R * feed_cross_x), W_ap)
+
+        # Microstrip feed-trace run length on the bottom layer.
+        if feed_side == "left":
+            y_run    = 0.55 * (board_wid / 2)
+            feed_len = (feed_cross_x - cav_left + m_back) + y_run
+        else:
+            feed_len = board_wid / 2
 
         # Quick sanity checks
         warn = []
@@ -290,6 +353,181 @@ class Vivaldi(AntennaBase):
             warn.append(f"L < 0.8·λ_low ({(C_LIGHT/fL)*1e3:.1f} mm); gain will be low.")
         if W_ap < 0.45 * (C_LIGHT / fL):
             warn.append(f"W_ap < λ_low/2; poor low-freq response.")
+        if w0 >= slot_w_feed * 0.999 and feed_cross_x > 0:
+            pass  # throat already wide — informational only
+
+        # --- Parametric curves for CAD import ------------------------------
+        # 1) Exponential taper edges (slot half-width above and below y=0).
+        #    Sample with 60 points so the polyline is smooth in CST.
+        N_pts = 60
+        xs = np.linspace(0.0, L, N_pts)
+        y_upper = np.minimum((w0 / 2) * np.exp(R * xs), W_ap / 2)
+        # 2) Back-cavity circle (drawn as a full circle for the geometry view
+        #    AND a "back arc" portion that connects the throat ends as part
+        #    of the etched slot+cavity opening).
+        cav_t = np.linspace(0, 2 * np.pi, 73)
+        cav_pts = [(cav_cx + cav_r * np.cos(t), cav_r * np.sin(t)) for t in cav_t]
+        # Angle at which the cavity passes through the throat (0, ±w0/2).
+        if cav_r > w0 / 2:
+            a0 = float(np.arcsin((w0 / 2) / cav_r))
+        else:
+            a0 = 0.0
+        # Back arc: from (0, −w0/2) going CW around the back to (0, +w0/2).
+        cav_back_angles = np.linspace(-a0, a0 - 2 * np.pi, 80)
+        cav_back_pts = [(cav_cx + cav_r * np.cos(a), cav_r * np.sin(a))
+                        for a in cav_back_angles]
+
+        # CST analytical expressions use the user's display unit (mm or mils).
+        mu = ctx.out_mult
+        w0_d   = w0   * mu
+        R_d    = R    / mu          # 1/m → 1/display-unit
+        L_d    = L    * mu
+        W_ap_d = W_ap * mu
+        cav_cx_d = cav_cx * mu
+        cav_r_d  = cav_r  * mu
+
+        curves = [
+            Curve(
+                name="Upper taper edge",
+                equation="y_upper(x) = (w0/2) · exp(R · x),  clipped to W_ap/2",
+                parameters={
+                    "w0":   (w0,   "m"),
+                    "R":    (R,    "1/m"),
+                    "W_ap": (W_ap, "m"),
+                    "x":    ((0.0, L), "m"),
+                },
+                points_m=[(float(x), float(y)) for x, y in zip(xs, y_upper)],
+                note="The lower edge is the mirror y_lower(x) = −y_upper(x).",
+                cst={
+                    "x_t":  "t",
+                    "y_t":  "min((w0/2)*exp(R*t), W_ap/2)",
+                    "z_t":  "0",
+                    "t_min": "0",
+                    "t_max": "L",
+                    "t_unit": ctx.unit_str,
+                },
+                dxf_combined=False,
+            ),
+            Curve(
+                name="Lower taper edge (mirror of upper)",
+                equation="y_lower(x) = −(w0/2) · exp(R · x),  clipped to −W_ap/2",
+                parameters={
+                    "w0":   (w0,   "m"),
+                    "R":    (R,    "1/m"),
+                    "W_ap": (W_ap, "m"),
+                    "x":    ((0.0, L), "m"),
+                },
+                points_m=[(float(x), float(-y)) for x, y in zip(xs, y_upper)],
+                cst={
+                    "x_t":  "t",
+                    "y_t":  "-min((w0/2)*exp(R*t), W_ap/2)",
+                    "z_t":  "0",
+                    "t_min": "0",
+                    "t_max": "L",
+                    "t_unit": ctx.unit_str,
+                },
+                dxf_combined=False,
+            ),
+            Curve(
+                name="Aperture right edge",
+                equation="x = L,  y ∈ [−W_ap/2, +W_ap/2]",
+                parameters={"L": (L, "m"), "W_ap": (W_ap, "m")},
+                points_m=[(float(L), float(-W_ap/2)),
+                          (float(L), float( W_ap/2))],
+                cst={
+                    "x_t":  "L",
+                    "y_t":  "t",
+                    "z_t":  "0",
+                    "t_min": "-W_ap/2",
+                    "t_max": "W_ap/2",
+                    "t_unit": ctx.unit_str,
+                },
+                note="Component of the closed slot+cavity boundary.",
+                dxf_combined=False,
+            ),
+            Curve(
+                name="Back-cavity arc (back side only)",
+                equation=("(x − cav_cx)² + y² = cav_r²,  arc from (0,−w0/2) "
+                          "around the back to (0,+w0/2)"),
+                parameters={
+                    "cav_cx": (cav_cx, "m"),
+                    "cav_r":  (cav_r,  "m"),
+                    "a0":     (a0,     "rad"),
+                },
+                points_m=cav_back_pts,
+                cst={
+                    "x_t":  "cav_cx + cav_r*cos(t)",
+                    "y_t":  "cav_r*sin(t)",
+                    "z_t":  "0",
+                    "t_min": "a0",
+                    "t_max": "2*pi - a0",
+                    "t_unit": "rad",
+                },
+                note=("Component of the closed slot+cavity boundary. "
+                      "Goes CCW from a0 to 2π−a0 along the back of the "
+                      "cavity (away from the slot)."),
+                dxf_combined=False,
+            ),
+            Curve(
+                name="Back-cavity circle (full, for reference)",
+                equation="(x − cav_cx)² + y² = cav_r²",
+                parameters={
+                    "cav_cx": (cav_cx, "m"),
+                    "cav_r":  (cav_r,  "m"),
+                },
+                points_m=cav_pts,
+                closed=True,
+                cst={
+                    "x_t":  "cav_cx + cav_r*cos(t)",
+                    "y_t":  "cav_r*sin(t)",
+                    "z_t":  "0",
+                    "t_min": "0",
+                    "t_max": "2*pi",
+                    "t_unit": "rad",
+                },
+                note=("Reference only — its back-side arc is already "
+                      "included in the closed boundary, so this full circle "
+                      "is omitted from the combined DXF."),
+                dxf_combined=False,
+            ),
+        ]
+
+        # ---- Recommended: full slot+cavity boundary as one closed loop -----
+        # Upper taper forward → vertical right edge → lower taper reversed →
+        # back-cavity arc closing from (0, −w0/2) around the back to
+        # (0, +w0/2). This polyline traces the ACTUAL etched copper
+        # opening — one face, one Boolean subtraction in CST.
+        upper = [(float(x), float(y)) for x, y in zip(xs, y_upper)]
+        lower_rev = [(float(x), float(-y))
+                     for x, y in zip(xs[::-1], y_upper[::-1])]
+        slot_boundary = upper + lower_rev + cav_back_pts  # ends at (0,+w0/2)
+        curves.append(Curve(
+            name="Slot + cavity — closed boundary (recommended)",
+            equation=("upper taper → right edge → lower taper → "
+                      "back-cavity arc"),
+            parameters={
+                "L":    (L,    "m"),
+                "W_ap": (W_ap, "m"),
+                "w0":   (w0,   "m"),
+                "R":    (R,    "1/m"),
+                "cav_r":  (cav_r,  "m"),
+                "cav_cx": (cav_cx, "m"),
+            },
+            points_m=slot_boundary,
+            closed=True,
+            note=("Import via the combined DXF, 'Cover Curve' to make a "
+                  "face, then ONE Boolean subtraction from the ground "
+                  "copper. The cavity arc on the back side closes the "
+                  "loop so the slot and cavity are a single opening — "
+                  "no second subtraction needed."),
+        ))
+
+        bandwidth = {
+            "f_low_hz":  fL,
+            "f_high_hz": fH,
+            "fractional": 2 * (fH - fL) / (fH + fL),
+            "note": "Wideband end-fire — set by taper length and aperture mouth.",
+        }
         return {
             "L": L, "W_ap": W_ap, "w0": w0, "R_rate": R,
             "cavity_dia": cavity_dia, "stub_len": stub_len,
@@ -303,7 +541,86 @@ class Vivaldi(AntennaBase):
             "lam_g_strip": lam_g_strip,
             "f_low": fL, "f_high": fH,
             "m_back": m_back, "m_side": m_side,
+            "slot_w_feed": slot_w_feed, "feed_len": feed_len,
+            # board_size = (X_extent, Y_extent) in metres, matching CAD axes.
+            # For the Vivaldi the taper opens along +X, so the long side is X.
+            "board_size": (board_len, board_wid),
+            # Board centre in the NATIVE plot frame — base.py translates
+            # curves so this becomes (0,0,0) in CST exports.
+            "board_center_m": ((L + cav_left - m_back) / 2, 0.0),
+            "curves": curves,
+            "bandwidth": bandwidth,
             "warnings": warn,
+            # ---- Math & CST parametric recipe -----------------------------
+            "math_equations": [
+                ("Exponential taper",
+                 "y(x) = ±(w0/2) · exp(R · x),   clipped to ±W_ap/2"),
+                ("Taper rate",
+                 "R = ln(W_ap / w0) / L"),
+                ("Back-cavity circle",
+                 "(x − cav_cx)² + y² = cav_r²"),
+                ("Cavity centre (so the cavity passes through (0, ±w0/2))",
+                 "cav_cx = −√(cav_r² − (w0/2)²)"),
+                ("Cavity-throat angle",
+                 "a0 = arcsin(w0 / (2·cav_r))"),
+                ("Microstrip-to-slotline crossing (λ/4 of slotline at fr)",
+                 "x_cross = λ_g_slot / 4  with  λ_g_slot = c / (fr·√((εr+1)/2))"),
+            ],
+            "cst_parameters": {
+                # --- base (user-tunable) ---
+                "L":      {"value": L * mu,           "unit": ctx.unit_str,
+                           "comment": "Taper length"},
+                "W_ap":   {"value": W_ap * mu,        "unit": ctx.unit_str,
+                           "comment": "Aperture (mouth) width"},
+                "w0":     {"value": w0 * mu,          "unit": ctx.unit_str,
+                           "comment": "Throat (slotline) width"},
+                "R":      {"value": R / mu,           "unit": f"1/{ctx.unit_str}",
+                           "comment": "Exponential taper rate"},
+                "cav_r":  {"value": cav_r * mu,       "unit": ctx.unit_str,
+                           "comment": "Back-cavity radius"},
+                "h":      {"value": ctx.h * mu,       "unit": ctx.unit_str,
+                           "comment": "Substrate thickness"},
+                "er":     {"value": ctx.er,           "unit": "",
+                           "comment": "Substrate relative permittivity"},
+                "W_feed": {"value": feed["W"] * mu,   "unit": ctx.unit_str,
+                           "comment": "Microstrip feed width (Z0 = "
+                                      f"{feed_Z:.0f} Ω)"},
+                "m_back": {"value": m_back * mu,      "unit": ctx.unit_str,
+                           "comment": "Substrate margin behind cavity"},
+                "m_side": {"value": m_side * mu,      "unit": ctx.unit_str,
+                           "comment": "Substrate margin beside taper"},
+                # --- derived (formulas, plus the value the formula evaluates
+                #     to so the user can sanity-check after pasting) ---
+                "cav_cx": {"formula": "-sqrt(cav_r^2 - (w0/2)^2)",
+                           "value":  cav_cx * mu,
+                           "unit":   ctx.unit_str,
+                           "comment": "Cavity centre x"},
+                "a0":     {"formula": "asin(w0/(2*cav_r))",
+                           "value":  a0,
+                           "unit":   "rad",
+                           "comment": "Cavity-throat angle"},
+                "board_L":{"formula": "L - (cav_cx - cav_r) + m_back",
+                           "value":  board_len * mu,
+                           "unit":   ctx.unit_str,
+                           "comment": "Total board length"},
+                "board_W":{"formula": "W_ap + 2*m_side",
+                           "value":  board_wid * mu,
+                           "unit":   ctx.unit_str,
+                           "comment": "Total board width"},
+            },
+            "cst_recipe_steps": [
+                "1) Build the ground-plane copper rectangle of size "
+                "board_L × board_W centred on the origin (or wherever).",
+                "2) Build all five analytical curves above.",
+                "3) Curves ▸ Join Curves: upper_taper → aperture_right_edge "
+                "→ lower_taper (reversed) → cavity_arc.  This makes one "
+                "closed loop.",
+                "4) Curves ▸ Cover Curve on that loop → one face.",
+                "5) Boolean ▸ Subtract that face from the ground-plane "
+                "copper.  Done.",
+                "   (Now you can sweep L, W_ap, w0, R, cav_r, … and CST "
+                "re-meshes automatically.)",
+            ],
         }
 
     def _summary_extra(self, ctx, r):
@@ -314,11 +631,15 @@ class Vivaldi(AntennaBase):
             f"  Taper length L    = {r['L']*m:.2f} {u}  ({r['L']*r['f_low']/C_LIGHT:.2f} λ_low)",
             f"  Aperture W_ap     = {r['W_ap']*m:.2f} {u}  ({r['W_ap']/(0.5*C_LIGHT/r['f_low']):.2f}·λ_low/2)",
             f"  Throat w₀         = {r['w0']*m:.3f} {u}",
-            f"  Taper rate R      = {r['R_rate']/1e3:.4f} / {u}",
+            f"  Taper rate R      = {r['R_rate']/m:.4f} / {u}",
             f"  Back-cavity Ø     = {r['cavity_dia']*m:.2f} {u}",
+            "",
             f"  Feed ↦ slotline   = {r['feed_cross_x']*m:.2f} {u} from cavity  (λ_g_slot/4 @ fr)",
+            f"  Slot W @ crossing = {r['slot_w_feed']*m:.3f} {u}  (slotline width the feed taps)",
             f"  Microstrip W      = {r['W_feed']*m:.3f} {u}  (Z₀={r['feed_Z']:.0f} Ω, εr_eff={r['Ereff_feed']:.2f})",
+            f"  Microstrip run    ≈ {r['feed_len']*m:.2f} {u}  (SMA → slot crossing, {r['feed_side']} feed)",
             f"  Radial stub       = r={r['stub_len']*m:.2f} {u}  ({r['stub_angle_deg']:.0f}° sector)",
+            "",
             f"  Estimated gain    ≈ {gain_dbi:.1f} dBi (typical)",
         ]
         if r.get("warnings"):
@@ -331,7 +652,7 @@ class Vivaldi(AntennaBase):
         L  = r["L"] * m
         w0 = r["w0"] * m
         W_ap = r["W_ap"] * m
-        Rm = r["R_rate"] / 1e3    # 1 / display-unit
+        Rm = r["R_rate"] / m      # convert 1/m → 1 / display-unit
         x = np.linspace(0, L, N)
         y = (w0 / 2) * np.exp(Rm * x)
         y = np.minimum(y, W_ap / 2)
@@ -352,8 +673,14 @@ class Vivaldi(AntennaBase):
 
         style_ax(ax.figure, ax, "Vivaldi — Exponentially Tapered Slot", equal=True)
 
-        # Board footprint: x from (-cavity-margin_back) to (+L  — aperture open to board edge!)
-        x_left  = -2 * cav_r - mb
+        # Board footprint: x from (cavity-leftmost − m_back) to (+L — aperture
+        # opens flush with the right board edge). Cavity centre comes from
+        # compute() (it's chosen so the cavity passes through (0, ±w0/2)).
+        if cav_r > w0/2:
+            _cx_off = float(np.sqrt(cav_r ** 2 - (w0/2) ** 2))
+        else:
+            _cx_off = cav_r
+        x_left  = -_cx_off - cav_r - mb
         x_right = L                                   # aperture at board edge
         y_half  = W_ap / 2 + ms
         ax.add_patch(mpatches.Rectangle(
@@ -371,8 +698,9 @@ class Vivaldi(AntennaBase):
         ]
 
         # Hole = back-cavity circle ∪ exponential slot, traversed clockwise.
-        # Cavity center at (-cav_r, 0) so cavity tangentially meets throat at x=0.
-        cav_cx = -cav_r
+        # Cavity centre chosen so the cavity passes EXACTLY through the throat
+        # points (0, ±w0/2) — no gap between cavity and tapers.
+        cav_cx = -_cx_off
         ang = np.linspace(-np.pi, np.pi, 120)
         cav_arc = [(cav_cx + cav_r * np.cos(a), cav_r * np.sin(a)) for a in ang]
 
@@ -458,7 +786,14 @@ class Vivaldi(AntennaBase):
             edgecolor="#1de9ff", lw=1.1, ls="--", zorder=4))
 
         # ---- Dimensions ----
-        # Envelope
+        # Overall board outline (drawn first, furthest out)
+        dim_horizontal(ax, x_left, x_right, -y_half - ms*0.95,
+                       f"Board L = {x_right - x_left:.2f}", offset=0,
+                       color=LAYER_COLORS["dim_special"])
+        dim_vertical(ax, -y_half, y_half, x_left - mb*0.45,
+                     f"Board W = {2*y_half:.2f}", offset=0,
+                     color=LAYER_COLORS["dim_special"])
+        # Taper envelope
         dim_horizontal(ax, 0, L, -y_half - ms*0.25, f"L = {L:.2f}", offset=0)
         dim_vertical(ax, -W_ap/2, W_ap/2, L + ms*0.3,
                      f"W_ap = {W_ap:.2f}", offset=0,
@@ -527,7 +862,7 @@ class Vivaldi(AntennaBase):
         L    = r["L"] * m
         w0   = r["w0"] * m
         W_ap = r["W_ap"] * m
-        Rm = r["R_rate"] / 1e3
+        Rm = r["R_rate"] / m
         x = np.linspace(0, L, 400)
         slot_w = np.minimum(w0 * np.exp(Rm * x), W_ap)
         E = 1.0 / np.clip(slot_w, 1e-9, None)
@@ -563,6 +898,9 @@ class Vivaldi(AntennaBase):
 class PyramidalHorn(AntennaBase):
     notes = ("WR-style rectangular waveguide flared to aperture (a1, b1). "
              "Optimum design: b1≈√(2λρ1), a1≈√(3λρ2); max gain when phase error ≈ 0.25λ / 0.4λ.")
+    polarization = "linear  (E along the b-wall direction, dominant TE10)"
+    beam_axis = "end-fire along +X (aperture face)"
+    bandwidth_note = "moderate (~30 %, limited by feeding waveguide cutoff)"
 
     def inputs(self):
         return [
@@ -573,8 +911,8 @@ class PyramidalHorn(AntennaBase):
         ]
 
     def compute(self, ctx, params):
-        a_wg = float(params.get("a_wg", "22.86")) * 1e-3
-        b_wg = float(params.get("b_wg", "10.16")) * 1e-3
+        a_wg = ctx.m(params.get("a_wg", "22.86"))
+        b_wg = ctx.m(params.get("b_wg", "10.16"))
         G_lin = 10 ** (float(params.get("gain_dBi_target", "15")) / 10)
         lam = ctx.lambda0
         # Optimum pyramidal horn (Balanis 13-54):
@@ -593,7 +931,8 @@ class PyramidalHorn(AntennaBase):
         L_ax = (pe + ph) / 2   # pick the average
         return {"a_wg": a_wg, "b_wg": b_wg, "a1": a1, "b1": b1,
                 "rho_e": rho_e, "rho_h": rho_h, "L_ax": L_ax,
-                "Gain_dBi": 10 * np.log10(G_lin), "Ereff": 1.0}
+                "Gain_dBi": 10 * np.log10(G_lin), "Ereff": 1.0,
+                "board_center_m": (L_ax / 2, 0.0)}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str

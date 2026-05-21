@@ -10,11 +10,11 @@ import numpy as np
 from scipy import integrate, special
 from matplotlib import patches as mpatches
 
-from .base import AntennaBase, Context, Input, register_antenna, C_LIGHT, ETA0
+from .base import AntennaBase, Context, Input, Curve, register_antenna, C_LIGHT, ETA0
 from calculators import microstrip, coax
 from plotting.cad import (
     LAYER_COLORS, style_ax, dim_horizontal, dim_vertical, dim_linear,
-    dim_radial, dim_diameter, leader, add_layer_legend,
+    dim_radial, dim_diameter, leader, add_layer_legend, dim_board,
 )
 
 
@@ -82,6 +82,9 @@ def _patch_pattern(theta, phi, L_eff, W, k0, h):
 @register_antenna("Rectangular Patch — Inset (Edge-Fed)", category="Patch")
 class RectPatchInset(AntennaBase):
     notes = "Inset cut y₀ from radiating edge; W_feed sized for target Z₀ microstrip."
+    polarization = "linear  (E along the resonant L direction)"
+    beam_axis = "broadside (+Z)"
+    bandwidth_note = "narrowband (~2–5 %), scales with substrate h"
 
     def inputs(self):
         return [
@@ -102,7 +105,7 @@ class RectPatchInset(AntennaBase):
             y0 = 0.0
         feed = microstrip.synthesize(ctx.z0, ctx.er, ctx.h)
         W_feed = feed["W"]
-        gap = float(params.get("inset_gap", "0.5")) * 1e-3  # entered in mm-ish
+        gap = ctx.m(params.get("inset_gap", "0.5"))
 
         # Clamp inset so we don't pass the center
         y0 = min(y0, L * 0.45)
@@ -114,6 +117,7 @@ class RectPatchInset(AntennaBase):
             "y0": y0, "W_feed": W_feed, "inset_gap": gap,
             "W_feed_Ereff": feed["Ereff"],
             "L_eff": L + 2 * dims["dL"],
+            "board_size": (L + 2 * ctx.Ls, W + 2 * ctx.Ws),
         }
 
     def _summary_extra(self, ctx, r):
@@ -168,24 +172,31 @@ class RectPatchInset(AntennaBase):
             (feed_start, -wf/2 - gap), y0, gap,
             facecolor=LAYER_COLORS["substrate"], zorder=4))
 
-        # Dimensions
-        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.55, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.55, f"W = {W:.2f}", offset=0)
+        # Dimensions — feature dims close to the part, board outline pushed
+        # outboard so the two layers don't fight for space.
+        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.3, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.3, f"W = {W:.2f}", offset=0)
         dim_horizontal(ax, feed_start, L/2, W/2 + gap + wf*1.4,
                        f"y₀ = {y0:.2f}", offset=0,
                        color=LAYER_COLORS["dim_alt"])
-        dim_vertical(ax, -wf/2, wf/2, feed_end - (feed_end - L/2)*0.4,
-                     f"W_f = {wf:.2f}", offset=0,
-                     color=LAYER_COLORS["dim_alt"])
+        # W_f leader pointing to the feed line from above, so the vertical
+        # text is no longer sitting on top of the copper trace.
+        leader(ax, (feed_end - (feed_end - L/2)*0.25, wf/2),
+               (feed_end + Ls*0.2, W/2 - Ws*0.2),
+               f"W_f = {wf:.2f}", color=LAYER_COLORS["dim_alt"])
         leader(ax, (feed_start + y0/2, wf/2 + gap/2),
                (L/2 + Ls*0.6, W/2 + Ws*0.3),
                f"gap = {gap:.2f}")
+
+        # Overall board outline (magenta, outboard of everything else)
+        dim_board(ax, -L/2 - Ls, L/2 + Ls, -W/2 - Ws, W/2 + Ws,
+                  pad_frac=0.12)
 
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], f"Substrate (εr={ctx.er:.2f}, h={ctx.h*m:.2f})"),
             (LAYER_COLORS["copper"], "Top copper"),
         ], loc="lower left")
-        ax.margins(0.12)
+        ax.margins(0.18)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "TM₁₀ Mode E-Field |Ez|", equal=True, grid=False)
@@ -224,6 +235,9 @@ class RectPatchInset(AntennaBase):
 class RectPatchRear(AntennaBase):
     notes = ("Coax pin through ground; x_feed measured from center (arcsin form). "
              "Teflon clearance hole in ground computed from coax dielectric εr.")
+    polarization = "linear  (E along the L direction of the patch)"
+    beam_axis = "broadside (+Z)"
+    bandwidth_note = "narrowband (~2–5 %)"
 
     def inputs(self):
         return [
@@ -246,7 +260,7 @@ class RectPatchRear(AntennaBase):
         else:
             x_feed = L / 2
 
-        pin_dia_m = float(params.get("pin_dia", "1.27")) * 1e-3
+        pin_dia_m = ctx.m(params.get("pin_dia", "1.27"))
         sma_er = float(params.get("sma_er", "2.08"))
         pin_rad = pin_dia_m / 2
 
@@ -260,6 +274,7 @@ class RectPatchRear(AntennaBase):
             "x_feed": x_feed, "pin_rad": pin_rad, "sma_rad": sma_rad,
             "Z_coax": Z_coax, "sma_er": sma_er,
             "L_eff": L + 2 * dims["dL"],
+            "board_size": (L + 2 * ctx.Ls, W + 2 * ctx.Ws),
         }
 
     def _summary_extra(self, ctx, r):
@@ -303,15 +318,23 @@ class RectPatchRear(AntennaBase):
                                      facecolor="#ff5050", edgecolor="black",
                                      lw=0.5, zorder=4))
 
-        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.55, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.55, f"W = {W:.2f}", offset=0)
-        dim_horizontal(ax, 0, xf, W/4, f"x_feed = {xf:.2f}", offset=0,
+        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.3, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.3, f"W = {W:.2f}", offset=0)
+        # x_feed dim sits above the pin (clear of any callouts on the right)
+        dim_horizontal(ax, 0, xf, W/2 - Ws*0.05,
+                       f"x_feed = {xf:.2f}", offset=0,
                        color=LAYER_COLORS["dim_alt"])
-        # Pin diameter callout
-        leader(ax, (xf + pr, 0), (xf + L*0.15, W*0.25),
+        # Pin / Teflon callouts go to the RIGHT of the patch where there's
+        # margin space, separated vertically so the two leaders don't collide.
+        leader(ax, (xf + pr, 0), (L/2 + Ls*0.4, W*0.35),
                f"Pin Ø{2*pr:.3f}")
-        leader(ax, (xf, -sr), (xf + L*0.15, -W*0.28),
+        leader(ax, (xf + sr*0.7, -sr*0.7),
+               (L/2 + Ls*0.4, -W*0.35),
                f"Teflon Ø{2*sr:.3f}\nZ_coax={r['Z_coax']:.1f} Ω")
+
+        # Overall board outline
+        dim_board(ax, -L/2 - Ls, L/2 + Ls, -W/2 - Ws, W/2 + Ws,
+                  pad_frac=0.12)
 
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], f"Substrate (εr={ctx.er:.2f})"),
@@ -319,7 +342,7 @@ class RectPatchRear(AntennaBase):
             ("#ff5050", "Coax pin"),
             ("#dcdcdc", "PTFE / clearance"),
         ], loc="lower left")
-        ax.margins(0.12)
+        ax.margins(0.18)
 
     def plot_fields(self, ax, ctx, r):
         RectPatchInset.plot_fields(self, ax, ctx, r)
@@ -336,11 +359,16 @@ class RectPatchRear(AntennaBase):
 @register_antenna("Rectangular Patch — Stub-Tuned (Edge-Fed)", category="Patch")
 class RectPatchStub(AntennaBase):
     notes = "Shunt open-circuit stub at distance d from patch; no inset cuts."
+    polarization = "linear  (E along the L direction of the patch)"
+    beam_axis = "broadside (+Z)"
+    bandwidth_note = "narrowband — stub gives single-frequency match"
 
     def inputs(self):
         return [
-            Input("use_measured_ZA", "Use measured ZA? (0/1)", "0",
-                  tooltip="If 1, uses ZA_real + j*ZA_imag; else uses R_edge"),
+            Input("use_measured_ZA", "Use measured ZA?", "No",
+                  choices=["No", "Yes"],
+                  tooltip="If Yes, uses ZA_real + j·ZA_imag; otherwise uses the "
+                          "cavity-model R_edge."),
             Input("ZA_real", "ZA real (Ω)", "475.22"),
             Input("ZA_imag", "ZA imag (Ω)", "8.74"),
         ]
@@ -352,7 +380,9 @@ class RectPatchStub(AntennaBase):
         k0 = 2 * np.pi * ctx.fr / C_LIGHT
         imp = _edge_resistance(L, W, k0)
 
-        use_meas = int(float(params.get("use_measured_ZA", "0")))
+        # Accept "Yes"/"No" from dropdown, or legacy numeric "0"/"1" strings.
+        raw_use = str(params.get("use_measured_ZA", "No")).strip().lower()
+        use_meas = raw_use in ("yes", "1", "true", "on")
         if use_meas:
             ZA = complex(float(params.get("ZA_real", "475")),
                          float(params.get("ZA_imag", "0")))
@@ -374,12 +404,23 @@ class RectPatchStub(AntennaBase):
                 "l_over_lambda": s["l_over_lambda"],
             })
 
+        # Board outline matches plot_geometry: substrate extends from the
+        # patch left edge past the stub junction (offset d on the first sol)
+        # to a feed tail equal to max(Ls, 4·W_feed).
+        d_first = picks[0]["d"] if picks else 0.0
+        feed_tail = max(ctx.Ls, 4 * feed["W"])
+        subs_w_m = L + 2 * ctx.Ls + d_first + feed_tail
+
+        # Substrate runs from x = -L/2 - Ls to that + subs_w_m
+        center_x = -L/2 - ctx.Ls + subs_w_m / 2
         return {
             "W": W, "L": L, "Ereff": Ereff, "dL": dims["dL"],
             "R_edge": imp["R_edge"], "ZA_used": ZA,
             "W_feed": feed["W"], "lam_g": lam_g,
             "stub_solutions": picks,
             "L_eff": L + 2 * dims["dL"],
+            "board_size": (subs_w_m, W + 2 * ctx.Ws),
+            "board_center_m": (center_x, 0.0),
         }
 
     def _summary_extra(self, ctx, r):
@@ -434,18 +475,28 @@ class RectPatchStub(AntennaBase):
         ax.add_patch(mpatches.Circle((feed_end, 0), wf * 1.4,
                                      fill=False, ls=":", ec=LAYER_COLORS["copper_edge"],
                                      lw=0.9, zorder=5))
-        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.55, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.55, f"W = {W:.2f}", offset=0)
-        dim_horizontal(ax, L/2, L/2 + d_m, -wf*2.5, f"d = {d_m:.2f}",
-                       offset=0, color=LAYER_COLORS["dim_alt"])
-        dim_vertical(ax, wf/2, wf/2 + l_m, L/2 + d_m + wf*2.5,
+        dim_horizontal(ax, -L/2, L/2, -W/2 - Ws*0.3, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax, -W/2, W/2, -L/2 - Ls*0.3, f"W = {W:.2f}", offset=0)
+        # 'd' annotation: dim line BELOW the substrate so it doesn't sit on
+        # the feed line.
+        dim_horizontal(ax, L/2, L/2 + d_m, -W/2 - Ws*0.55,
+                       f"d = {d_m:.2f}", offset=0,
+                       color=LAYER_COLORS["dim_alt"])
+        # Stub length — labelled to the right of the stub strip
+        dim_vertical(ax, wf/2, wf/2 + l_m, L/2 + d_m + wf*4.0,
                      f"l = {l_m:.2f}", offset=0,
                      color=LAYER_COLORS["dim_alt"])
+
+        # Overall board outline (board_size is in METERS; convert to display)
+        bb_w_disp = r["board_size"][0] * m
+        dim_board(ax, -L/2 - Ls, -L/2 - Ls + bb_w_disp,
+                  -W/2 - Ws, W/2 + Ws, pad_frac=0.10)
+
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], "Substrate"),
             (LAYER_COLORS["copper"], "Top copper"),
         ], loc="lower left")
-        ax.margins(0.08)
+        ax.margins(0.14)
 
     def plot_fields(self, ax, ctx, r):
         RectPatchInset.plot_fields(self, ax, ctx, r)
@@ -463,6 +514,9 @@ class RectPatchStub(AntennaBase):
 class CircularPatch(AntennaBase):
     notes = ("TM₁₁ mode, J′₁ root 1.8412. Feed at radius ρ tuned to match Z₀ via "
              "R_in(ρ) = R_edge·J₁²(kρ)/J₁²(ka).")
+    polarization = "linear  (set by feed-pin azimuth — orthogonal pin gives CP pair)"
+    beam_axis = "broadside (+Z)"
+    bandwidth_note = "narrowband (~1–3 %)"
 
     def inputs(self):
         return [
@@ -508,14 +562,33 @@ class CircularPatch(AntennaBase):
                          1e-6 * a_eff, a_eff - 1e-9)
         except ValueError:
             rho = 0.35 * a_eff
-        pin_rad = float(params.get("pin_dia", "1.27")) * 1e-3 / 2
+        pin_rad = ctx.m(params.get("pin_dia", "1.27")) / 2
         sma_er = float(params.get("sma_er", "2.08"))
         sma_rad = coax.outer_from_inner(pin_rad, ctx.z0, sma_er)
+        # Patch edge as a parametric circle
+        t_pts = np.linspace(0, 2*np.pi, 73)
+        patch_pts = [(float(a * np.cos(t)), float(a * np.sin(t))) for t in t_pts]
+        a_d = a * ctx.out_mult
+        curves = [
+            Curve(name="Circular patch edge",
+                  equation="x(t)=a·cos(t),  y(t)=a·sin(t)",
+                  parameters={"a": (a, "m  (patch radius)"),
+                              "t": ((0.0, 2*np.pi), "rad")},
+                  points_m=patch_pts, closed=True,
+                  cst={
+                      "x_t": f"{a_d:.6f}*cos(t)",
+                      "y_t": f"{a_d:.6f}*sin(t)",
+                      "z_t": "0",
+                      "t_min": "0", "t_max": "2*pi", "t_unit": "rad",
+                  }),
+        ]
         return {
             "a": a, "a_eff": a_eff, "R_edge": R_edge,
             "x_feed": rho, "pin_rad": pin_rad, "sma_rad": sma_rad,
             "Ereff": er,   # circular patch doesn't define Ereff in the same way
             "Z_coax": coax.impedance_from_diameters(2*pin_rad, 2*sma_rad, sma_er),
+            "board_size": (2 * a + 2 * ctx.Ls, 2 * a + 2 * ctx.Ws),
+            "curves": curves,
         }
 
     def _summary_extra(self, ctx, r):
@@ -551,16 +624,24 @@ class CircularPatch(AntennaBase):
         ax.add_patch(mpatches.Circle((xf, 0), pr, facecolor="#ff5050",
                                      edgecolor="black", lw=0.5, zorder=4))
         dim_radial(ax, (0, 0), a, 45, f"a = {a:.2f}")
-        dim_horizontal(ax, 0, xf, -a*0.6, f"ρ = {xf:.2f}", offset=0,
+        # ρ dim — keep it inside the patch on a free quadrant (below feed)
+        dim_horizontal(ax, 0, xf, -a*0.55, f"ρ = {xf:.2f}", offset=0,
                        color=LAYER_COLORS["dim_alt"])
-        leader(ax, (xf, -sr), (a * 0.7, -a * 0.95),
+        # Coax / Teflon callout: parked outside the patch, to the right, so
+        # the leader doesn't run across the patch face.
+        leader(ax, (xf + sr*0.7, -sr*0.7),
+               (a + Ls*0.5, -a*0.6),
                f"Pin Ø{2*pr:.3f}\nTef. Ø{2*sr:.3f}\nZ_coax={r['Z_coax']:.1f} Ω")
+
+        # Overall board outline
+        dim_board(ax, -a - Ls, a + Ls, -a - Ws, a + Ws, pad_frac=0.10)
+
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], "Substrate"),
             (LAYER_COLORS["copper"], "Patch copper"),
             ("#ff5050", "Coax pin"),
         ], loc="lower left")
-        ax.margins(0.12)
+        ax.margins(0.18)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "TM₁₁ Mode |Ez|  (with Jρ arrows)", equal=True, grid=False)
@@ -614,6 +695,9 @@ class CircularPatch(AntennaBase):
 @register_antenna("PIFA — Planar Inverted-F", category="Patch")
 class PIFA(AntennaBase):
     notes = "L + W ≈ λg/4; shorting pin at patch edge, feed pin nearby."
+    polarization = "linear  (E parallel to the shorted edge)"
+    beam_axis = "broadside (+Z), with some +X tilt due to short"
+    bandwidth_note = "narrowband (~5 %, BW grows with substrate height)"
 
     def inputs(self):
         return [
@@ -625,15 +709,18 @@ class PIFA(AntennaBase):
     def compute(self, ctx, params):
         # Effective εr for a half-filled / quasi-TEM cavity (Soras et al.)
         er_eff = (ctx.er + 1) / 2
-        W_target = float(params.get("W_target", "8.0")) * 1e-3
+        W_target = ctx.m(params.get("W_target", "8.0"))
         total = C_LIGHT / (4 * ctx.fr * np.sqrt(er_eff))
         if W_target >= total * 0.9:
             W_target = total * 0.4
         L = total - W_target
-        short_w = float(params.get("short_w", "2.0")) * 1e-3
-        feed_off = float(params.get("feed_offset", "1.0")) * 1e-3
+        short_w  = ctx.m(params.get("short_w", "2.0"))
+        feed_off = ctx.m(params.get("feed_offset", "1.0"))
         return {"L": L, "W": W_target, "Ereff": er_eff,
-                "short_w": short_w, "feed_off": feed_off, "total": total}
+                "short_w": short_w, "feed_off": feed_off, "total": total,
+                "board_size": (L + 2 * ctx.Ls, W_target + 2 * ctx.Ws),
+                # PIFA substrate spans x=[-Ls, L+Ls] so the centre sits at L/2
+                "board_center_m": (L / 2, 0.0)}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str
@@ -684,17 +771,21 @@ class PIFA(AntennaBase):
                 ha="center", va="center", color="#c0c0c0", fontsize=8,
                 style="italic", zorder=6)
 
-        # Dimensions — placed right at the patch boundaries
-        dim_horizontal(ax, 0, L, W/2 + 0.8, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax,  -W/2, W/2, L + 0.8, f"W = {W:.2f}", offset=0)
-        dim_vertical(ax,  -sw/2, sw/2, -wall_thk - 0.8,
+        # Dimensions — the patch is small, so park every label OUTSIDE the
+        # copper to keep things readable.
+        dim_horizontal(ax, 0, L, W/2 + Ws*0.4, f"L = {L:.2f}", offset=0)
+        dim_vertical(ax,  -W/2, W/2, L + Ls*0.25, f"W = {W:.2f}", offset=0)
+        dim_vertical(ax,  -sw/2, sw/2, -wall_thk - Ls*0.25,
                      f"short = {sw:.2f}", offset=0,
                      color=LAYER_COLORS["dim_alt"])
-        dim_horizontal(ax, 0, fo, W/2 - 1.5,
-                       f"feed = {fo:.2f}", offset=0,
-                       color=LAYER_COLORS["dim_alt"])
-        leader(ax, (fo, 0), (fo + L*0.25, -W/2 - Ws*0.3),
+        # 'feed' dim below the patch
+        leader(ax, (fo, 0), (fo + Ls*0.5, -W/2 - Ws*0.2),
+               f"feed = {fo:.2f}", color=LAYER_COLORS["dim_alt"])
+        leader(ax, (fo, 0), (-Ls*0.5, -W/2 - Ws*0.5),
                f"Feed pin Ø{2*pin_r:.2f}")
+
+        # Overall board outline (substrate envelope)
+        dim_board(ax, -Ls, L + Ls, -W/2 - Ws, W/2 + Ws, pad_frac=0.10)
 
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"],  f"Substrate (εr={ctx.er:.2f}, h={ctx.h*m:.2f})"),
@@ -702,7 +793,7 @@ class PIFA(AntennaBase):
             ("#bdbdbd",                  "Shorting wall (patch→GND)"),
             ("#ff5050",                  "Feed pin (coax from GND)"),
         ], loc="lower right")
-        ax.margins(0.15)
+        ax.margins(0.22)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "PIFA Quarter-wave E-field", equal=True, grid=False)
@@ -735,6 +826,9 @@ class PIFA(AntennaBase):
 @register_antenna("Patch Array 2×1 (Corporate-Fed)", category="Patch")
 class Array2x1(AntennaBase):
     notes = "Two rectangular patches fed via T-junction with λ/4 impedance matching."
+    polarization = "linear  (E along the patch L direction)"
+    beam_axis = "broadside (+Z), narrower in H-plane than single patch"
+    bandwidth_note = "narrowband — element BW dominates, ~2–5 %"
 
     def inputs(self):
         return [Input("spacing_lambda", "Element spacing (λ₀)", "0.5")]
@@ -752,12 +846,24 @@ class Array2x1(AntennaBase):
         z_trans = np.sqrt(imp["R_edge"] * 2 * ctx.z0)
         qw = microstrip.synthesize(z_trans, ctx.er, ctx.h)
         lam_g_feed = C_LIGHT / (ctx.fr * np.sqrt(qw["Ereff"]))
+        # Board outline mirrors the corporate-feed layout in plot_geometry.
+        qw_len = lam_g_feed / 4
+        feed_tail = max(ctx.Ls, 1.2 * qw_len)
+        board_w_m = spacing + L + 2 * ctx.Ls
+        board_h_m = W + ctx.Ws + qw_len + feed["W"] + feed_tail
+
+        # Substrate y range: from board_bot = -qw_len - feed["W"] - feed_tail
+        #                    up to board_top = W + ctx.Ws.
+        board_bot = -qw_len - feed["W"] - feed_tail
+        board_top = W + ctx.Ws
         return {
             "W": W, "L": L, "Ereff": dims["Ereff"],
             "R_edge": imp["R_edge"], "spacing": spacing,
             "W_feed": feed["W"], "W_qw": qw["W"], "Z_qw": z_trans,
-            "qw_len": lam_g_feed / 4,
+            "qw_len": qw_len,
             "L_eff": L + 2 * dims["dL"],
+            "board_size": (board_w_m, board_h_m),
+            "board_center_m": (0.0, (board_top + board_bot) / 2),
         }
 
     def _summary_extra(self, ctx, r):
@@ -844,11 +950,15 @@ class Array2x1(AntennaBase):
                (S/4, board_bot + feed_tail*0.05),
                f"Feed (Z₀={ctx.z0:.0f} Ω)")
 
+        # Overall board outline (envelope of the substrate)
+        dim_board(ax, board_xmin, board_xmax, board_bot, board_top,
+                  pad_frac=0.10)
+
         add_layer_legend(ax, [
             (LAYER_COLORS["substrate"], "Substrate"),
             (LAYER_COLORS["copper"],    "Top copper (patches + feed)"),
         ], loc="lower right")
-        ax.margins(0.08)
+        ax.margins(0.14)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "Array Elements — TM₁₀ |Ez|", equal=True, grid=False)

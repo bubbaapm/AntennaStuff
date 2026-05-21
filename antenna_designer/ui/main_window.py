@@ -10,7 +10,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTextEdit, QLabel, QStatusBar, QMessageBox, QFileDialog, QDockWidget,
-    QToolBar, QPushButton,
+    QToolBar, QPushButton, QCheckBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QKeySequence, QFont
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self._last_ctx = None
         self._last_antenna_name = None
         self._last_antenna = None
+        self._has_computed_once = False
 
         self._build_ui()
         self._build_menu()
@@ -80,9 +81,18 @@ class MainWindow(QMainWindow):
         self.fig_field, self.canvas_field = _mk_canvas()
         self.tabs.addTab(self._wrap_canvas(self.canvas_field), "E-Field / Currents")
 
-        # Tab 4 — 2D Radiation
-        self.fig_rad2, self.canvas_rad2 = _mk_canvas(figsize=(8, 4))
-        self.tabs.addTab(self._wrap_canvas(self.canvas_rad2), "2D Radiation Pattern")
+        # Tab 4 — 2D Radiation (with a "Show antenna" toggle above the canvas)
+        self.fig_rad2, self.canvas_rad2 = _mk_canvas(figsize=(8, 5))
+        self.chk_show_geom_2d = QCheckBox("Show antenna geometry")
+        self.chk_show_geom_2d.setChecked(True)
+        self.chk_show_geom_2d.setToolTip(
+            "Add a top-down view of the antenna above the polar plots so you "
+            "can see how the beam direction maps to the physical layout.")
+        self.chk_show_geom_2d.toggled.connect(self._redraw_pattern_2d_if_ready)
+        self.tabs.addTab(
+            self._wrap_canvas_with_check(self.canvas_rad2,
+                                         [self.chk_show_geom_2d]),
+            "2D Radiation Pattern")
 
         # Tab 5 — 3D Radiation
         self.rad3d = Radiation3DView()
@@ -107,6 +117,28 @@ class MainWindow(QMainWindow):
         v.addWidget(canvas, 1)
         return w
 
+    def _wrap_canvas_with_check(self, canvas, extra_widgets):
+        """Like _wrap_canvas but appends extra widgets (checkboxes etc.) to
+        the toolbar row."""
+        w = QWidget()
+        v = QVBoxLayout(w); v.setContentsMargins(2, 2, 2, 2)
+        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+        toolbar = NavTB(canvas, w)
+        toolbar.setStyleSheet("background: #242424; color: #e0e0e0;")
+        row.addWidget(toolbar)
+        for ew in extra_widgets:
+            row.addWidget(ew)
+        row.addStretch(1)
+        bar_w = QWidget(); bar_w.setLayout(row)
+        v.addWidget(bar_w)
+        v.addWidget(canvas, 1)
+        return w
+
+    def _redraw_pattern_2d_if_ready(self):
+        if self._last_antenna and self._last_ctx and self._last_results is not None:
+            self._draw_pattern_2d(self._last_antenna, self._last_ctx,
+                                  self._last_results)
+
     def _build_menu(self):
         mb = self.menuBar()
 
@@ -123,6 +155,44 @@ class MainWindow(QMainWindow):
         a_exp = QAction("Export current plot (PNG)…", self)
         a_exp.triggered.connect(self._export_current_plot)
         file_m.addAction(a_exp)
+        export_m = file_m.addMenu("Export geometry curves")
+        a_dxf_all = QAction("DXF — single combined .dxf (recommended)…", self)
+        a_dxf_all.setToolTip("One .dxf file containing every curve as a "
+                             "separate POLYLINE on its own layer, plus the "
+                             "substrate-outline rectangle. Import once in "
+                             "CST → Curves → New Curve → Import.")
+        a_dxf_all.triggered.connect(self._export_geometry_dxf_combined)
+        export_m.addAction(a_dxf_all)
+        a_dxf = QAction("DXF — one .dxf per curve…", self)
+        a_dxf.setToolTip("Each curve as its own .dxf file. Use this if "
+                         "you want curve-by-curve control over which "
+                         "polyline gets imported.")
+        a_dxf.triggered.connect(self._export_geometry_dxf_per_curve)
+        export_m.addAction(a_dxf)
+        a_cst_an = QAction("CST analytical-curve text (.txt)…", self)
+        a_cst_an.setToolTip("Pre-formatted X(t), Y(t), Z(t) blocks ready to "
+                            "paste into CST → Curves → Create Analytical Curve.")
+        a_cst_an.triggered.connect(self._export_geometry_cst_analytical)
+        export_m.addAction(a_cst_an)
+        a_spline = QAction("CST spline points — one .txt per curve…", self)
+        a_spline.setToolTip("Pick a folder. Each curve is saved as its own "
+                            "ASCII-pure 'x y z' TXT — no headers, no unicode, "
+                            "no comments. Ready for CST → Curves → Curve "
+                            "from File. Use this if your previous TXT "
+                            "imports failed.")
+        a_spline.triggered.connect(self._export_geometry_spline_per_curve)
+        export_m.addAction(a_spline)
+        a_spline1 = QAction("CST spline points — single combined .txt…", self)
+        a_spline1.setToolTip("All curves in one file, blank-line separated. "
+                             "Some CST versions need the per-curve variant "
+                             "above instead.")
+        a_spline1.triggered.connect(self._export_geometry_spline_txt)
+        export_m.addAction(a_spline1)
+        a_csv = QAction("Generic CSV (.csv)…", self)
+        a_csv.setToolTip("Comma-separated values with headers — for "
+                         "spreadsheets / scripts.")
+        a_csv.triggered.connect(self._export_geometry_csv)
+        export_m.addAction(a_csv)
         file_m.addSeparator()
         a_quit = QAction("Quit", self)
         a_quit.setShortcut(QKeySequence.StandardKey.Quit)
@@ -197,7 +267,13 @@ class MainWindow(QMainWindow):
             self.rad3d.set_pattern(ctx, results, ant.pattern)
 
             self.statusBar().showMessage(f"Computed: {name} ✓")
-            self.tabs.setCurrentIndex(1)  # jump to CAD view
+            # On the very first compute, surface the CAD tab so the user sees
+            # the antenna they just made. On subsequent recomputes (e.g. F5
+            # tweaks), respect whatever tab they're already on so iterating
+            # doesn't bounce them away from the Calculators / 3D view.
+            if not self._has_computed_once:
+                self.tabs.setCurrentIndex(1)
+            self._has_computed_once = True
         except Exception as e:
             traceback.print_exc()
             QMessageBox.critical(self, "Compute error",
@@ -206,33 +282,108 @@ class MainWindow(QMainWindow):
     def _draw_pattern_2d(self, ant, ctx, results):
         self.fig_rad2.clf()
         cuts = ant.pattern_cuts(ctx, results)
-        # E-plane (elevation, varying θ, φ=0)
-        ax1 = self.fig_rad2.add_subplot(121, projection="polar")
-        style_ax(self.fig_rad2, ax1, "E-plane (φ=0°)  — θ vs |U|", equal=False, grid=True)
-        U_e = np.maximum(cuts["U_e"], 1e-5)
-        Udb_e = 20 * np.log10(U_e)
-        Udb_e = np.clip(Udb_e, -40, 0)
-        ax1.plot(cuts["theta_e"], Udb_e + 40, color="#00e0b4", lw=2)
-        ax1.fill(cuts["theta_e"], Udb_e + 40, color="#00e0b4", alpha=0.25)
-        ax1.set_theta_zero_location("N")
-        ax1.set_rmax(40); ax1.set_rticks([10, 20, 30, 40])
-        ax1.set_yticklabels(["-30", "-20", "-10", "0 dB"])
-        ax1.grid(True, alpha=0.5)
+        fom = ant.figures_of_merit(ctx, results) or {}
+        hpbw_e = fom.get("HPBW_E_deg", float("nan"))
+        hpbw_h = fom.get("HPBW_H_deg", float("nan"))
 
-        # H-plane (azimuth, θ=90°, varying φ)
-        ax2 = self.fig_rad2.add_subplot(122, projection="polar")
-        style_ax(self.fig_rad2, ax2, "H-plane (θ=90°) — φ vs |U|", equal=False, grid=True)
-        U_a = np.maximum(cuts["U_a"], 1e-5)
-        Udb_a = 20 * np.log10(U_a)
-        Udb_a = np.clip(Udb_a, -40, 0)
-        ax2.plot(cuts["phi_a"], Udb_a + 40, color="#ffd34d", lw=2)
-        ax2.fill(cuts["phi_a"], Udb_a + 40, color="#ffd34d", alpha=0.25)
-        ax2.set_theta_zero_location("E")
-        ax2.set_rmax(40); ax2.set_rticks([10, 20, 30, 40])
-        ax2.set_yticklabels(["-30", "-20", "-10", "0 dB"])
-        ax2.grid(True, alpha=0.5)
+        show_geom = (self.chk_show_geom_2d.isChecked()
+                     if hasattr(self, "chk_show_geom_2d") else False)
+        if show_geom:
+            # Geometry on top, two polar cuts below. Generous hspace so the
+            # polar titles don't crash into the geometry inset's axes.
+            gs = self.fig_rad2.add_gridspec(2, 2, height_ratios=[1.0, 2.0],
+                                            hspace=0.55, wspace=0.20)
+            ax_geom = self.fig_rad2.add_subplot(gs[0, :])
+            try:
+                # Stripped-down outline view (NOT the full CAD plot — its
+                # dimension labels turn into illegible noise at inset size).
+                ant.plot_outline_overview(ax_geom, ctx, results)
+            except Exception as e:
+                ax_geom.text(0.5, 0.5, f"Geometry overlay error:\n{e}",
+                             ha="center", va="center",
+                             transform=ax_geom.transAxes, color="red")
+                ax_geom.set_axis_off()
+            ax1 = self.fig_rad2.add_subplot(gs[1, 0], projection="polar")
+            ax2 = self.fig_rad2.add_subplot(gs[1, 1], projection="polar")
+        else:
+            ax1 = self.fig_rad2.add_subplot(121, projection="polar")
+            ax2 = self.fig_rad2.add_subplot(122, projection="polar")
+        # In overlay mode, render the per-plot title+peak readout INSIDE the
+        # polar axes as a footer line so the labels don't crash into the
+        # geometry inset above.
+        _label_inside = show_geom
 
-        self.fig_rad2.tight_layout()
+        def _draw_cut(ax, angles, U, color, title):
+            """Plot one principal-plane cut with the beam rotated to the top.
+
+            Both polar plots use the standard antenna-engineering convention
+            of "boresight at 0° (top)" so the same physical direction is at
+            the same screen position regardless of which cut you're looking
+            at. The polar tick labels therefore read as 'angle from beam',
+            not absolute θ/φ; the footer line reports the original data
+            angle of the peak for cross-reference.
+            """
+            from antennas.base import _hpbw_from_cut
+            U = np.asarray(U)
+            Umax = U.max() if U.size else 0.0
+            if Umax <= 0:
+                if _label_inside:
+                    ax.text(0.5, -0.10, title, transform=ax.transAxes,
+                            ha="center", va="top",
+                            color=LAYER_COLORS["text"], fontsize=9)
+                else:
+                    ax.set_title(title, color=LAYER_COLORS["text"],
+                                 fontsize=10, pad=12)
+                return
+
+            U_safe = np.maximum(U, 1e-5)
+            Udb = np.clip(20 * np.log10(U_safe / Umax), -40, 0)
+
+            # Rotate the polar so the peak sits at 0° (top with N origin).
+            ipk = int(np.argmax(U))
+            pk_data_deg = float(np.degrees(angles[ipk])) % 360.0
+            rotated = (angles - angles[ipk]) % (2 * np.pi)
+            order = np.argsort(rotated)
+            a_p = np.concatenate([rotated[order], [2 * np.pi]])
+            Udb_p = np.concatenate([Udb[order], [Udb[order][0]]])
+
+            ax.plot(a_p, Udb_p + 40, color=color, lw=2)
+            ax.fill(a_p, Udb_p + 40, color=color, alpha=0.25)
+            ax.set_rmax(40); ax.set_rticks([10, 20, 30, 40])
+            ax.set_yticklabels(["-30", "-20", "-10", "0 dB"])
+            ax.grid(True, alpha=0.5)
+            # Peak marker (now always at polar 0° = top) + −3 dB ring
+            ax.plot([0], [Udb[ipk] + 40], "o", color="#ffffff",
+                    markersize=5, zorder=5)
+            ax.plot(a_p, np.full_like(a_p, 37.0),
+                    color="#888", ls="--", lw=0.7, alpha=0.7)
+
+            hpbw = _hpbw_from_cut(angles, U)
+            sub = f"beam @ data {pk_data_deg:.1f}°"
+            if np.isfinite(hpbw):
+                sub += f"   HPBW = {hpbw:.1f}°"
+            if _label_inside:
+                ax.text(0.5, -0.10, f"{title}   {sub}",
+                        transform=ax.transAxes, ha="center", va="top",
+                        color=LAYER_COLORS["text"], fontsize=9)
+            else:
+                ax.set_title(title + "\n" + sub,
+                             color=LAYER_COLORS["text"], fontsize=10, pad=12)
+
+        # Both plots use the same polar convention so the beam direction
+        # appears in the same screen position. θ=0 (top), counter-clockwise.
+        for ax in (ax1, ax2):
+            style_ax(self.fig_rad2, ax, "", equal=False, grid=True)
+            ax.set_theta_zero_location("N")
+            ax.set_theta_direction(-1)  # clockwise — 90° on the right
+
+        _draw_cut(ax1, cuts["theta_e"], cuts["U_e"],
+                  "#00e0b4", "E-plane (φ=0°)")
+        _draw_cut(ax2, cuts["phi_a"], cuts["U_a"],
+                  "#ffd34d", "H-plane (θ=90°)")
+
+        if not show_geom:
+            self.fig_rad2.tight_layout()
         self.canvas_rad2.draw_idle()
 
     def _save_design(self):
@@ -286,12 +437,145 @@ class MainWindow(QMainWindow):
             self.input_panel.cb_unit.setCurrentText(base["unit_str"])
             # Restore extras
             for k, v in data.get("params", {}).items():
-                if k in self.input_panel._extra_inputs:
-                    self.input_panel._extra_inputs[k].setText(str(v))
+                self.input_panel.set_extra(k, v)
             self.statusBar().showMessage(f"Loaded: {fn}")
             self._do_compute()
         except Exception as e:
             QMessageBox.critical(self, "Load error", str(e))
+
+    def _have_results(self) -> bool:
+        if (self._last_antenna is None or self._last_ctx is None
+                or self._last_results is None):
+            QMessageBox.information(self, "Nothing to export",
+                                    "Compute an antenna first.")
+            return False
+        return True
+
+    def _export_geometry_csv(self):
+        if not self._have_results():
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}_curves.csv"
+        fn, _ = QFileDialog.getSaveFileName(self, "Export curves (CSV)",
+                                            default, "CSV (*.csv)")
+        if not fn:
+            return
+        try:
+            text = self._last_antenna.export_geometry_csv(
+                self._last_ctx, self._last_results)
+            Path(fn).write_text(text, encoding="utf-8")
+            self.statusBar().showMessage(f"Wrote CSV to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_cst_analytical(self):
+        if not self._have_results():
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}_cst_analytical.txt"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export CST analytical-curve text", default,
+            "Text (*.txt)")
+        if not fn:
+            return
+        try:
+            text = self._last_antenna.export_cst_analytical_text(
+                self._last_ctx, self._last_results)
+            Path(fn).write_text(text, encoding="utf-8")
+            self.statusBar().showMessage(
+                f"Wrote CST analytical-curve text to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_spline_txt(self):
+        if not self._have_results():
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}_spline.txt"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export spline points (single combined TXT)", default,
+            "Text (*.txt)")
+        if not fn:
+            return
+        try:
+            text = self._last_antenna.export_spline_txt(
+                self._last_ctx, self._last_results, include_header=False)
+            # ASCII-only write (CST 2023 chokes on UTF-8 BOM in spline files)
+            Path(fn).write_text(text, encoding="ascii", errors="replace")
+            self.statusBar().showMessage(f"Wrote spline TXT to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_dxf_combined(self):
+        if not self._have_results():
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}.dxf"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export combined DXF (all curves in one file)",
+            default, "DXF (*.dxf)")
+        if not fn:
+            return
+        try:
+            text = self._last_antenna.export_combined_dxf(
+                self._last_ctx, self._last_results)
+            Path(fn).write_bytes(text.encode("ascii", errors="replace"))
+            self.statusBar().showMessage(f"Wrote combined DXF to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_dxf_per_curve(self):
+        if not self._have_results():
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Pick output folder — one DXF per curve will be saved here")
+        if not out_dir:
+            return
+        try:
+            files = self._last_antenna.export_dxf_per_curve(
+                self._last_ctx, self._last_results)
+            if not files:
+                QMessageBox.information(self, "Nothing to export",
+                                        "This antenna doesn't declare any "
+                                        "parametric curves.")
+                return
+            for name, content in files:
+                (Path(out_dir) / name).write_bytes(content.encode("ascii",
+                                                                   errors="replace"))
+            QMessageBox.information(
+                self, "DXF export",
+                f"Wrote {len(files)} DXF files to:\n{out_dir}\n\n"
+                + "\n".join(f"  • {n}" for n, _ in files)
+                + "\n\nCST: Curves → Curve → New Curve → Import.")
+            self.statusBar().showMessage(
+                f"Wrote {len(files)} DXF files to: {out_dir}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_spline_per_curve(self):
+        if not self._have_results():
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Pick output folder — one TXT per curve will be saved here")
+        if not out_dir:
+            return
+        try:
+            files = self._last_antenna.export_spline_txt_per_curve(
+                self._last_ctx, self._last_results)
+            if not files:
+                QMessageBox.information(self, "Nothing to export",
+                                        "This antenna doesn't declare any "
+                                        "parametric curves.")
+                return
+            written = []
+            for name, content in files:
+                p = Path(out_dir) / name
+                p.write_text(content, encoding="ascii", errors="replace")
+                written.append(name)
+            QMessageBox.information(
+                self, "Spline TXT export",
+                f"Wrote {len(written)} files to:\n{out_dir}\n\n"
+                + "\n".join(f"  • {n}" for n in written))
+            self.statusBar().showMessage(
+                f"Wrote {len(written)} TXT files to: {out_dir}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
 
     def _export_current_plot(self):
         idx = self.tabs.currentIndex()

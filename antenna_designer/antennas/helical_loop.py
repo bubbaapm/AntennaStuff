@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from matplotlib import patches as mpatches
 
-from .base import AntennaBase, Context, Input, register_antenna, C_LIGHT, ETA0
+from .base import AntennaBase, Context, Input, Curve, register_antenna, C_LIGHT, ETA0
 from plotting.cad import (
     LAYER_COLORS, style_ax, dim_horizontal, dim_vertical, dim_radial,
     leader, add_layer_legend,
@@ -20,6 +20,9 @@ from plotting.cad import (
 class AxialHelical(AntennaBase):
     notes = ("End-fire helical antenna (Kraus). Valid range: 3/4λ ≤ C ≤ 4/3λ, "
              "pitch 12°–14°. Right-hand or left-hand circular polarization.")
+    polarization = "circular  (RHCP for right-handed wind, LHCP for left)"
+    beam_axis = "end-fire along +Z (helix axis)"
+    bandwidth_note = "moderate (~40 % around design freq for axial mode)"
 
     def inputs(self):
         return [
@@ -33,7 +36,7 @@ class AxialHelical(AntennaBase):
         N = max(3, int(float(params.get("turns", "7"))))
         alpha_deg = float(params.get("pitch_deg", "13"))
         alpha = np.radians(alpha_deg)
-        a = float(params.get("wire_r", "1.5")) * 1e-3
+        a = ctx.m(params.get("wire_r", "1.5"))
         gnd_r = float(params.get("gnd_r_lam", "0.75")) * ctx.lambda0
 
         C = ctx.lambda0                   # circumference ≈ λ
@@ -52,10 +55,56 @@ class AxialHelical(AntennaBase):
         hpbw = 52 / (Cn * np.sqrt(N * Sn)) if N * Sn > 0 else 0
         # Validity check
         valid = 0.75 <= Cn <= 1.33 and 12 <= alpha_deg <= 14
+        envelope_diam = max(2 * gnd_r, D)
+
+        # --- Parametric curve: 3D helix points ----------------------------
+        # x(t) = (D/2)·cos(t),  y(t) = (D/2)·sin(t),  z(t) = (S/(2π))·t
+        # t ∈ [0, 2πN]; sampled to 24 points per turn for a smooth wire path.
+        N_per_turn = 24
+        t_samples = np.linspace(0.0, 2 * np.pi * N, N * N_per_turn + 1)
+        helix_pts = [(float((D/2) * np.cos(t)),
+                      float((D/2) * np.sin(t)),
+                      float((S/(2*np.pi)) * t)) for t in t_samples]
+
+        mu = ctx.out_mult
+        D_d = D * mu
+        S_d = S * mu
+        curves = [
+            Curve(
+                name="Helix wire path (axial-mode coil)",
+                equation="x(t)=(D/2)·cos(t),  y(t)=(D/2)·sin(t),  z(t)=(S/2π)·t",
+                parameters={
+                    "D": (D, "m  (coil diameter)"),
+                    "S": (S, "m  (pitch per turn)"),
+                    "N": (N, " turns"),
+                    "t": ((0.0, 2*np.pi*N), "rad"),
+                },
+                points_m=helix_pts,
+                note=("Right-handed wind (RHCP) — reverse φ direction for LHCP. "
+                      "Wire of radius a runs along this path."),
+                cst={
+                    "x_t":  f"{D_d/2:.6f}*cos(t)",
+                    "y_t":  f"{D_d/2:.6f}*sin(t)",
+                    "z_t":  f"({S_d:.6f}/(2*pi))*t",
+                    "t_min": "0",
+                    "t_max": f"2*pi*{N}",
+                    "t_unit": "rad",
+                },
+            ),
+        ]
+        bw_low  = ctx.fr * 0.75
+        bw_high = ctx.fr * 1.20
+        bandwidth = {
+            "f_low_hz": bw_low, "f_high_hz": bw_high,
+            "fractional": (bw_high - bw_low) / ctx.fr,
+            "note": "Axial mode valid for 0.75 ≲ C/λ ≲ 1.33 (Kraus).",
+        }
         return {"N": N, "alpha_deg": alpha_deg, "a": a,
                 "C": C, "D": D, "S": S, "L_ax": L_ax,
                 "gnd_r": gnd_r, "R_in": R_in, "Gain_dBi": G_dBi,
-                "HPBW_deg": hpbw, "valid_axial_mode": valid}
+                "HPBW_deg": hpbw, "valid_axial_mode": valid,
+                "board_size": (envelope_diam, L_ax),
+                "curves": curves, "bandwidth": bandwidth}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str
@@ -92,14 +141,19 @@ class AxialHelical(AntennaBase):
         ax.plot(x, z, color="#ffce4a", lw=2, zorder=2)
         # Feed
         ax.plot([D/2], [0], "o", color="red", markersize=5, zorder=5)
-        dim_vertical(ax, 0, L_ax, D/2 + gnd*0.1, f"L = {L_ax:.1f}", offset=0)
+        # L dim moved farther out so the "{N} turns" text box doesn't sit on it.
+        dim_vertical(ax, 0, L_ax, D/2 + gnd*0.05 + D*0.4,
+                     f"L = {L_ax:.1f}", offset=0)
         dim_horizontal(ax, -D/2, D/2, L_ax + S*0.5, f"D = {D:.1f}",
                        offset=0, color=LAYER_COLORS["dim_alt"])
-        dim_horizontal(ax, -gnd, gnd, -0.04*L_ax, f"GND Ø = {2*gnd:.1f}",
+        dim_horizontal(ax, -gnd, gnd, -0.08*L_ax, f"GND Ø = {2*gnd:.1f}",
                        offset=0, color=LAYER_COLORS["dim_alt"])
-        ax.text(D/2 * 1.3, L_ax * 0.5,
+        # Info text — placed to the LEFT of the helix where there's no
+        # dimension line.
+        ax.text(-D/2 - gnd*0.05, L_ax * 0.5,
                 f"{N} turns\nα = {r['alpha_deg']:.1f}°\nS = {S:.1f}",
                 color=LAYER_COLORS["text"], fontsize=9,
+                ha="right", va="center",
                 bbox=dict(facecolor=LAYER_COLORS["panel_bg"],
                           edgecolor=LAYER_COLORS["axis"], pad=4))
 
@@ -132,6 +186,9 @@ class AxialHelical(AntennaBase):
 class CircularLoop(AntennaBase):
     notes = ("Small loop (C ≪ λ): magnetic dipole, Rr = 20π²(C/λ)⁴. "
              "Large loop (C ≈ λ): resonant, high R_in (~100 Ω), single main lobe in plane.")
+    polarization = "linear  (E tangential to loop plane)"
+    beam_axis = "donut around loop axis (small) / in-plane peak (1λ loop)"
+    bandwidth_note = "narrowband (resonant loop)"
 
     def inputs(self):
         return [
@@ -140,8 +197,8 @@ class CircularLoop(AntennaBase):
         ]
 
     def compute(self, ctx, params):
-        a = float(params.get("radius", "10")) * 1e-3
-        aw = float(params.get("wire_r", "0.5")) * 1e-3
+        a  = ctx.m(params.get("radius", "10"))
+        aw = ctx.m(params.get("wire_r", "0.5"))
         C = 2 * np.pi * a
         Cn = C / ctx.lambda0
         # Radiation resistance
@@ -154,8 +211,31 @@ class CircularLoop(AntennaBase):
             mode = "resonant / large loop"
             Rr = 100.0  # approximate for 1λ loop
             X_L = 0.0
+        outer = 2 * (a + aw)
+        # Parametric: circular wire (the loop itself)
+        t_pts = np.linspace(0, 2 * np.pi, 73)
+        loop_pts = [(float(a * np.cos(t)), float(a * np.sin(t))) for t in t_pts]
+        a_d = a * ctx.out_mult
+        curves = [
+            Curve(
+                name="Loop wire centreline",
+                equation="x(t) = a · cos(t),   y(t) = a · sin(t)",
+                parameters={"a": (a, "m  (loop radius)"),
+                            "t": ((0.0, 2*np.pi), "rad")},
+                points_m=loop_pts, closed=True,
+                note="Wire diameter 2·aw runs along this path.",
+                cst={
+                    "x_t": f"{a_d:.6f}*cos(t)",
+                    "y_t": f"{a_d:.6f}*sin(t)",
+                    "z_t": "0",
+                    "t_min": "0", "t_max": "2*pi", "t_unit": "rad",
+                },
+            ),
+        ]
         return {"a": a, "aw": aw, "C": C, "C_over_lambda": Cn,
-                "mode": mode, "Rr": Rr, "X_L": X_L}
+                "mode": mode, "Rr": Rr, "X_L": X_L,
+                "board_size": (outer, outer),
+                "curves": curves}
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str

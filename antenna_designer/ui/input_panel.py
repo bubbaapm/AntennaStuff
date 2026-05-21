@@ -24,8 +24,9 @@ class InputPanel(QScrollArea):
         self._root = QWidget()
         self.setWidget(self._root)
 
-        # Must exist before _antenna_changed is triggered by combo population
-        self._extra_inputs: dict[str, QLineEdit] = {}
+        # Must exist before _antenna_changed is triggered by combo population.
+        # Values are QLineEdit (free text) or QComboBox (fixed choices).
+        self._extra_inputs: dict[str, QWidget] = {}
         self.extra_form = QFormLayout()
         self.extra_widget = QWidget()
         self.extra_widget.setLayout(self.extra_form)
@@ -53,13 +54,27 @@ class InputPanel(QScrollArea):
         v.addWidget(self._h_title("Base parameters"))
         self.base_form = QFormLayout()
         self.fr = QLineEdit("5.35")
+        self.fr.setToolTip(
+            "Design / centre frequency. For wideband antennas (Vivaldi, LPDA, "
+            "Yagi…) this only sizes the feed network; bandwidth comes from "
+            "the antenna-specific f_low / f_high fields below.")
         self.z0 = QLineEdit("50")
+        self.z0.setToolTip("Target source impedance (Ω) — sets feed-line width.")
         self.Ls = QLineEdit("15")
+        self.Ls.setToolTip(
+            "Extra substrate margin along the X axis (length direction). "
+            "Adds copper-free border outside the radiator.")
         self.Ws = QLineEdit("15")
+        self.Ws.setToolTip(
+            "Extra substrate margin along the Y axis (width direction).")
         self.loss_tan = QLineEdit("0.02")
+        self.loss_tan.setToolTip("Substrate dielectric loss tangent (tan δ).")
 
         self.cb_unit = QComboBox()
         self.cb_unit.addItems(["mm", "mils"])
+        self.cb_unit.setToolTip(
+            "Display unit for all lengths. Switching does NOT convert the "
+            "numbers already typed in — re-enter values if you change unit.")
 
         # Substrate combo + εr/h (auto-populated when substrate changes)
         self.cb_sub = QComboBox()
@@ -67,12 +82,20 @@ class InputPanel(QScrollArea):
         for name in SUBSTRATES.keys():
             self.cb_sub.addItem(name)
         self.cb_sub.currentTextChanged.connect(self._on_substrate)
+        # Standard panel thickness picker — populates from the chosen substrate.
+        self.cb_h_preset = QComboBox()
+        self.cb_h_preset.addItem("— pick h —")
+        self.cb_h_preset.currentTextChanged.connect(self._on_h_preset)
+        self.cb_h_preset.setToolTip(
+            "Standard panel thicknesses for the selected substrate. "
+            "Selecting one fills in the h field below.")
         self.er = QLineEdit("4.4")
         self.h = QLineEdit("1.6")
 
         self.base_form.addRow("Resonant freq (GHz):", self.fr)
         self.base_form.addRow("Target Z₀ (Ω):", self.z0)
         self.base_form.addRow("Substrate preset:", self.cb_sub)
+        self.base_form.addRow("Standard h (mm):", self.cb_h_preset)
         self.base_form.addRow("εr:", self.er)
         self.base_form.addRow("h — substrate (units):", self.h)
         self.base_form.addRow("Ls — margin X (units):", self.Ls)
@@ -128,12 +151,18 @@ class InputPanel(QScrollArea):
             self.extra_form.removeRow(0)
         # Populate
         for inp in ant.inputs():
-            le = QLineEdit(inp.default)
+            if inp.choices:
+                w = QComboBox()
+                w.addItems([str(c) for c in inp.choices])
+                if inp.default in [str(c) for c in inp.choices]:
+                    w.setCurrentText(inp.default)
+            else:
+                w = QLineEdit(inp.default)
             if inp.tooltip:
-                le.setToolTip(inp.tooltip)
+                w.setToolTip(inp.tooltip)
             unit_s = f" ({inp.unit})" if inp.unit else ""
-            self.extra_form.addRow(inp.label + unit_s, le)
-            self._extra_inputs[inp.key] = le
+            self.extra_form.addRow(inp.label + unit_s, w)
+            self._extra_inputs[inp.key] = w
         if ant.notes:
             lbl = QLabel(f"<i>{ant.notes}</i>")
             lbl.setWordWrap(True)
@@ -142,13 +171,36 @@ class InputPanel(QScrollArea):
         self.antenna_changed.emit(name)
 
     def _on_substrate(self, name):
+        # Refresh the standard-thickness picker for the chosen substrate
+        self.cb_h_preset.blockSignals(True)
+        self.cb_h_preset.clear()
+        self.cb_h_preset.addItem("— pick h —")
+        if name in SUBSTRATES:
+            for t in SUBSTRATES[name]["thick_mm"]:
+                self.cb_h_preset.addItem(f"{t:g}")
+        self.cb_h_preset.blockSignals(False)
+
         if name == "— Custom —" or name not in SUBSTRATES:
             return
         s = SUBSTRATES[name]
         self.er.setText(f"{s['er']:.3f}")
         self.loss_tan.setText(f"{s['tan_d']:.4f}")
+        # Default to the thinnest standard panel (most common for high-freq work)
         if s["thick_mm"]:
-            self.h.setText(str(s["thick_mm"][-1]))
+            self.h.setText(f"{s['thick_mm'][0]:g}")
+
+    def _on_h_preset(self, txt):
+        if not txt or txt.startswith("—"):
+            return
+        try:
+            float(txt)
+        except ValueError:
+            return
+        # Standard thicknesses are quoted in mm; convert if user is in mils.
+        if self.cb_unit.currentText() == "mils":
+            self.h.setText(f"{float(txt)/2.54e-2:g}")
+        else:
+            self.h.setText(txt)
 
     # ---- public API ----
     def current_antenna(self):
@@ -173,13 +225,22 @@ class InputPanel(QScrollArea):
     def read_params(self):
         """Read the antenna-specific params dict.
 
-        Note: values with "(units)" in their label are converted to meters;
-        everything else passes through as strings (antennas decide).
+        All values pass through as strings; antennas decide on conversion.
         """
-        unit = self.cb_unit.currentText()
-        conv = 2.54e-5 if unit == "mils" else 1e-3
         out = {}
         for k, w in self._extra_inputs.items():
-            out[k] = w.text()
-        # Let antennas that want unit conversion do it themselves; pass through raw.
+            if isinstance(w, QComboBox):
+                out[k] = w.currentText()
+            else:
+                out[k] = w.text()
         return out
+
+    def set_extra(self, key, value):
+        """Set one antenna-specific input by key (combo- or line-edit aware)."""
+        w = self._extra_inputs.get(key)
+        if w is None:
+            return
+        if isinstance(w, QComboBox):
+            w.setCurrentText(str(value))
+        else:
+            w.setText(str(value))

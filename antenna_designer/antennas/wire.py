@@ -32,6 +32,9 @@ def _dipole_shortening(length_to_diameter: float) -> float:
 @register_antenna("Half-Wave Dipole", category="Wire")
 class HalfWaveDipole(AntennaBase):
     notes = "Resonant length shortened by end-effect; depends on L/d ratio."
+    polarization = "linear  (E parallel to dipole axis)"
+    beam_axis = "donut around dipole axis (omni in plane normal to wire)"
+    bandwidth_note = "narrowband (~10 %), wider with fatter wire"
 
     def inputs(self):
         return [
@@ -40,8 +43,8 @@ class HalfWaveDipole(AntennaBase):
         ]
 
     def compute(self, ctx, params):
-        a = float(params.get("wire_r", "0.5")) * 1e-3
-        gap = float(params.get("gap", "1.0")) * 1e-3
+        a   = ctx.m(params.get("wire_r", "0.5"))
+        gap = ctx.m(params.get("gap", "1.0"))
         # iterative: initial guess L = 0.475λ
         L = 0.475 * ctx.lambda0
         for _ in range(5):
@@ -77,13 +80,15 @@ class HalfWaveDipole(AntennaBase):
         # feedpoint
         ax.plot([0], [0], "o", color="red", markersize=6, zorder=5,
                 label="Feedpoint")
-        dim_horizontal(ax, -L/2, L/2, a * 8, f"L = {L:.2f}", offset=0)
-        dim_vertical(ax, -a, a, L/2 + L*0.05,
-                     f"Ø{2*a:.2f}", offset=0,
-                     color=LAYER_COLORS["dim_alt"])
-        dim_horizontal(ax, -gap/2, gap/2, -a*10, f"gap = {gap:.2f}",
-                       offset=0, color=LAYER_COLORS["dim_alt"])
-        ax.set_ylim(-L*0.15, L*0.15)
+        # Length dim above the wire
+        dim_horizontal(ax, -L/2, L/2, L*0.08, f"L = {L:.2f}", offset=0)
+        # Wire diameter — leader from the wire end, label parked outside
+        leader(ax, (L/2, 0), (L/2 + L*0.10, L*0.08),
+               f"Ø{2*a:.2f}", color=LAYER_COLORS["dim_alt"])
+        # Feed gap — leader to the feedpoint with the label below
+        leader(ax, (0, 0), (-L*0.10, -L*0.10),
+               f"gap = {gap:.2f}", color=LAYER_COLORS["dim_alt"])
+        ax.set_ylim(-L*0.18, L*0.18)
         ax.legend(loc="lower right", facecolor=LAYER_COLORS["panel_bg"],
                   edgecolor=LAYER_COLORS["axis"], labelcolor=LAYER_COLORS["text"])
 
@@ -119,6 +124,9 @@ class HalfWaveDipole(AntennaBase):
 @register_antenna("Quarter-Wave Monopole", category="Wire")
 class QuarterMonopole(AntennaBase):
     notes = "Vertical over ground plane. Same pattern as dipole in upper hemisphere, ~half R_in."
+    polarization = "linear  (vertical, E parallel to wire)"
+    beam_axis = "omni in azimuth, lobe at θ ≈ 30–60° from horizon"
+    bandwidth_note = "narrowband (~10 %)"
 
     def inputs(self):
         return [
@@ -127,8 +135,8 @@ class QuarterMonopole(AntennaBase):
         ]
 
     def compute(self, ctx, params):
-        a = float(params.get("wire_r", "0.5")) * 1e-3
-        gnd = float(params.get("gnd_radius", "25.0")) * 1e-3
+        a   = ctx.m(params.get("wire_r", "0.5"))
+        gnd = ctx.m(params.get("gnd_radius", "25.0"))
         L = 0.25 * ctx.lambda0
         for _ in range(5):
             Ld = 2 * L / (2 * a)
@@ -158,9 +166,13 @@ class QuarterMonopole(AntennaBase):
                                          facecolor=LAYER_COLORS["wire"],
                                          edgecolor=LAYER_COLORS["axis"], zorder=2))
         ax.plot([0], [0], "o", color="red", markersize=6, zorder=5)
-        dim_vertical(ax, 0, L, a*8, f"L = {L:.2f}", offset=0)
-        dim_horizontal(ax, -gnd, gnd, -0.04*L, f"GND Ø = {2*gnd:.2f}", offset=0,
+        # L dim to the right of the wire
+        dim_vertical(ax, 0, L, a*8 + L*0.04, f"L = {L:.2f}", offset=0)
+        # GND Ø dim well below the ground line so the label is on free space.
+        dim_horizontal(ax, -gnd, gnd, -L*0.12,
+                       f"GND Ø = {2*gnd:.2f}", offset=0,
                        color=LAYER_COLORS["dim_alt"])
+        ax.set_ylim(-L*0.20, L*1.10)
 
     def plot_fields(self, ax, ctx, r):
         style_ax(ax.figure, ax, "Monopole Current Distribution |I(z)|",
@@ -194,6 +206,9 @@ class QuarterMonopole(AntennaBase):
 @register_antenna("Yagi-Uda", category="Wire")
 class YagiUda(AntennaBase):
     notes = "NBS / Viezbicke-style dimensions — 1 reflector, 1 driven, N-2 directors."
+    polarization = "linear  (E parallel to elements)"
+    beam_axis = "end-fire along +X (away from reflector)"
+    bandwidth_note = "narrowband (~3–10 %), narrows as you add directors"
 
     def inputs(self):
         return [
@@ -220,7 +235,7 @@ class YagiUda(AntennaBase):
     def compute(self, ctx, params):
         N = max(3, int(float(params.get("n_elements", "5"))))
         N = min(N, 7)
-        a = float(params.get("wire_r", "1.0")) * 1e-3
+        a = ctx.m(params.get("wire_r", "1.0"))
         t = self._NBS[N]
         lam = ctx.lambda0
         L_refl = t["LR"] * lam
@@ -231,11 +246,16 @@ class YagiUda(AntennaBase):
         boom_len = S_refl + sum(S_dirs)
         # Simple gain estimate (Balanis figure-of-merit): Gain ≈ 8·log(N) + 2 dBi
         gain_est = 6 + 2.5 * np.log10(N)
+        max_L = max([L_refl, L_drvn] + L_dirs)
         return {
             "N": N, "a": a,
             "L_refl": L_refl, "L_drvn": L_drvn, "L_dirs": L_dirs,
             "S_refl": S_refl, "S_dirs": S_dirs, "boom": boom_len,
             "gain_dBi_est": gain_est,
+            # board_size = (X_extent, Y_extent). Yagi boom runs along +X.
+            "board_size": (boom_len, max_L),
+            # Reflector at x=-S_refl, last director at +Σ(S_dirs).
+            "board_center_m": ((-S_refl + sum(S_dirs)) / 2, 0.0),
         }
 
     def _summary_extra(self, ctx, r):
@@ -273,23 +293,26 @@ class YagiUda(AntennaBase):
         # Boom
         boom_len = positions[-1] - positions[0]
         ax.plot([positions[0], positions[-1]], [0, 0], "w-", lw=1.5, zorder=1)
-        # Elements
+        # Elements — element NAME at a uniform high band above all bars,
+        # element LENGTH printed below each bar; the two rows can't collide.
+        L_refl_disp = r["L_refl"] * m
+        name_y = L_refl_disp / 2 + L_refl_disp * 0.20
+        len_y  = -L_refl_disp / 2 - L_refl_disp * 0.10
         for x, L, c, lbl in zip(positions, lengths, colors, labels):
             ax.add_patch(mpatches.Rectangle((x - a, -L/2), 2*a, L,
                                              facecolor=c,
                                              edgecolor=LAYER_COLORS["axis"], zorder=2))
-            ax.text(x, L/2 + r["L_refl"]*m*0.06, lbl, ha="center",
+            ax.text(x, name_y, lbl, ha="center", va="bottom",
                     color=LAYER_COLORS["text"], fontsize=8, zorder=3)
-        # Dimensions
+            ax.text(x, len_y, f"{L:.1f}", ha="center", va="top",
+                    color=LAYER_COLORS["dim_alt"], fontsize=8, zorder=3,
+                    bbox=dict(facecolor=LAYER_COLORS["bg"], edgecolor="none",
+                              alpha=0.6, pad=1.5))
+        # Boom dimension below the lengths row
         max_L = max(lengths)
-        dim_horizontal(ax, positions[0], positions[-1], -max_L/2 - max_L*0.15,
+        dim_horizontal(ax, positions[0], positions[-1],
+                       -max_L/2 - max_L*0.28,
                        f"Boom = {boom_len:.1f}", offset=0)
-        for i, (p, L) in enumerate(zip(positions[1:], lengths[1:]), start=1):
-            dim_vertical(ax, -L/2, L/2, p + max_L*0.03 + a*3,
-                         f"{L:.1f}", offset=0, color=LAYER_COLORS["dim_alt"])
-        dim_vertical(ax, -lengths[0]/2, lengths[0]/2,
-                     positions[0] - max_L*0.06,
-                     f"{lengths[0]:.1f}", offset=0, color=LAYER_COLORS["dim_alt"])
 
     def plot_fields(self, ax, ctx, r):
         ax.text(0.5, 0.5, "Yagi: see 3D / 2D Pattern tabs",
@@ -324,6 +347,9 @@ class YagiUda(AntennaBase):
 class LPDA(AntennaBase):
     notes = ("Carrel's design. τ=length ratio (0.8–0.95), σ=relative spacing (0.12–0.22). "
              "Higher τ and σ → more gain, longer boom.")
+    polarization = "linear  (E parallel to dipole elements)"
+    beam_axis = "end-fire along +X (toward short-element end)"
+    bandwidth_note = "wideband — set by longest/shortest dipole"
 
     def inputs(self):
         return [
@@ -339,7 +365,7 @@ class LPDA(AntennaBase):
         fH = float(params.get("f_high_GHz", "3")) * 1e9
         tau = float(params.get("tau", "0.88"))
         sigma = float(params.get("sigma", "0.17"))
-        a = float(params.get("wire_r", "1.0")) * 1e-3
+        a = ctx.m(params.get("wire_r", "1.0"))
 
         # Longest dipole ≈ λ/2 at fL; boundary factor b=1.1 to cover fL cleanly
         bar = 1.1
@@ -356,10 +382,17 @@ class LPDA(AntennaBase):
         # Approx gain (Carrel): G_dBi ≈ 7 + 45·(σ - 0.05)  roughly
         # More standard: use a fit — G ≈ 7 + 35·σ·τ
         gain = 7 + 35 * sigma * tau
+        bw = {"f_low_hz": fL, "f_high_hz": fH,
+              "fractional": 2*(fH-fL)/(fH+fL),
+              "note": "Wideband — covers fL..fH from longest..shortest dipole."}
         return {
             "N": N, "a": a, "tau": tau, "sigma": sigma,
             "lengths": lengths, "spacings": spacings, "boom": boom,
             "f_low": fL, "f_high": fH, "gain_dBi_est": gain,
+            # board_size = (X_extent, Y_extent). LPDA boom runs along +X.
+            "board_size": (boom, lengths[0]),
+            "board_center_m": (boom / 2, 0.0),
+            "bandwidth": bw,
         }
 
     def _summary_extra(self, ctx, r):

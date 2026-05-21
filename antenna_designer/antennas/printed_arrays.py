@@ -16,7 +16,7 @@ from .base import AntennaBase, Context, Input, register_antenna, C_LIGHT, ETA0
 from calculators import microstrip
 from plotting.cad import (
     LAYER_COLORS, style_ax, dim_horizontal, dim_vertical,
-    leader, add_layer_legend,
+    leader, add_layer_legend, dim_board,
 )
 
 
@@ -35,6 +35,9 @@ class MicrostripQuasiYagi(AntennaBase):
              "element; microstrip-to-CPS balun drives the printed dipole; "
              "printed directors on top layer. Topology after Kaneda-Qian-Itoh "
              "(IEEE MTT 2002). Enter physical dimensions in mm.")
+    polarization = "linear  (E parallel to printed dipole arm)"
+    beam_axis = "end-fire along +X (toward directors)"
+    bandwidth_note = "moderate (~25–50 %) — balun and reflector set the BW"
 
     def inputs(self):
         return [
@@ -61,8 +64,7 @@ class MicrostripQuasiYagi(AntennaBase):
         n_dirs = max(0, int(float(params.get("n_dirs", "3"))))
 
         def _val(key, default_m):
-            v = float(params.get(key, "0")) * 1e-3  # input in mm-ish "units" == mm when out_mult=1e3
-            return v if v > 0 else default_m
+            return ctx.m_or(params.get(key, "0"), default_m)
 
         # Auto defaults
         L_drvn_arm = _val("L_drvn", 0.21 * lam_g)         # each arm ≈ 0.21 λg  → total ~0.42 λg (printed dipole is slightly shorter than λ/2 due to fringing)
@@ -76,7 +78,7 @@ class MicrostripQuasiYagi(AntennaBase):
         margin     = _val("margin", 0.05 * lam0)
 
         # Microstrip feed synthesis
-        W_feed_input = float(params.get("W_feed", "0.0")) * 1e-3
+        W_feed_input = ctx.m(params.get("W_feed", "0.0"))
         if W_feed_input > 0:
             W_feed = W_feed_input
             ms = microstrip.analyze(W_feed, ctx.er, ctx.h)
@@ -129,6 +131,8 @@ class MicrostripQuasiYagi(AntennaBase):
             "x_gnd_end": x_gnd_end,
             "Z0_feed": Z0_feed, "er_feed": er_feed,
             "gain_dBi_est": gain_est, "margin": margin,
+            "board_size": (x_right - x_left, y_top - y_bot),
+            "board_center_m": ((x_left + x_right) / 2, (y_top + y_bot) / 2),
         }
 
     def _summary_extra(self, ctx, r):
@@ -245,20 +249,20 @@ class MicrostripQuasiYagi(AntennaBase):
                 ha="center", va="top", fontsize=8,
                 color=LAYER_COLORS["dim"])
 
-        # Labels
-        ax.text((x_left + x_gnd_end)/2, y_bot + (y_top - y_bot)*0.04,
-                "Truncated ground (bottom layer — acts as reflector)",
-                ha="center", va="bottom", fontsize=8, color=LAYER_COLORS["text"],
-                alpha=0.75)
+        # No on-figure "Truncated ground" annotation — the layer legend in
+        # the corner already names the bottom-layer reflector, and the text
+        # only fought for space with the width leaders.
 
-        # Dimensions
-        #   L_arm: placed to the LEFT of the driven dipole so it doesn't cover the arm.
+        # ---- Dimensions ---------------------------------------------------
+        x_last_dir = (r["x_dirs"][-1]*m if r["x_dirs"] else x_drvn + margin)
+
+        #   L_arm — between the dipole arm and the rightmost director, well
+        #   clear of any copper.
         dim_vertical(ax, y_cps_u + W_cps/2, y_cps_u + W_cps/2 + L_arm,
-                     x_drvn - margin*0.8,
+                     x_drvn + (x_last_dir - x_drvn) * 0.5,
                      f"L_arm={L_arm:.2f}", offset=0,
                      color=LAYER_COLORS["dim_alt"])
-        #   L_dir: placed to the RIGHT of the last director
-        x_last_dir = (r["x_dirs"][-1]*m if r["x_dirs"] else x_drvn + margin)
+        #   L_dir — to the RIGHT of the last director
         dim_vertical(ax, -L_dir/2, L_dir/2,
                      x_last_dir + margin*0.45,
                      f"L_dir={L_dir:.2f}", offset=0,
@@ -279,30 +283,41 @@ class MicrostripQuasiYagi(AntennaBase):
                            f"s_dir={s_dir_val:.2f}", offset=0,
                            color=LAYER_COLORS["dim_alt"])
 
-        # Line-width leaders (W_feed / W_strip / CPS) for fabrication
-        leader(ax, (x_left * 0.45, W_feed/2),
-               (x_left * 0.45, y_top - margin*0.8),
+        # Line-width leaders — each label parked in a different region so
+        # the three never compete for the same y-row.
+        # W_feed: leader pointing UP from the feed, label parked DOWN-LEFT
+        # in the lower-margin area below the ground patch.
+        leader(ax, (x_left + (x_gnd_end - x_left)*0.4, W_feed/2),
+               (x_left*0.5, y_bot + margin*0.35),
                f"W_feed={W_feed:.2f}")
-        # W_cps / gap — leader anchored just above the CPS, label placed
-        # below the dipole arms to stay clear of the L_arm dimension line.
-        cps_anchor_x = x_gnd_end + (x_drvn - x_gnd_end) * 0.25
+        # W_cps / gap: leader to a CPS track, label parked ABOVE the dipole
+        # (lower right of the upper margin band) — won't share x with W_feed.
+        cps_anchor_x = x_gnd_end + (x_drvn - x_gnd_end) * 0.5
         leader(ax, (cps_anchor_x, y_cps_u),
-               (cps_anchor_x - margin*0.2, -L_arm * 0.35),
-               f"W_cps={W_cps:.2f}\ngap={gap_cps:.2f}")
-        leader(ax, (x_last_dir + W_strip/2, -L_dir/2 + L_dir*0.15),
-               (x_last_dir + margin*1.2, -L_dir/2 - margin*0.1),
+               ((x_drvn + r["x_dirs"][0]*m)*0.5 if r["x_dirs"] else x_drvn + margin,
+                y_top - margin*0.4),
+               f"W_cps={W_cps:.2f} / gap={gap_cps:.2f}")
+        # W_strip: leader from the rightmost director, label parked to the
+        # far right outside the substrate.
+        leader(ax, (x_last_dir + W_strip/2, 0.0),
+               (x_last_dir + margin*1.4, -L_dir/2 - margin*0.4),
                f"W_strip={W_strip:.2f}")
-        # Balun stub length (bottom-layer open stub below ground edge)
+        # Balun stub — dim line moved OUT to the left of the stub so the
+        # label is no longer painted on top of the stub itself.
         dim_vertical(ax, -r["L_balun"]*m*0.9, 0.0,
-                     x_gnd_end - W_feed, f"L_balun={r['L_balun']*m*0.9:.2f}",
+                     x_gnd_end - W_feed * 2.5,
+                     f"L_balun={r['L_balun']*m*0.9:.2f}",
                      offset=0, color=LAYER_COLORS["dim_special"])
+
+        # Overall board outline
+        dim_board(ax, x_left, x_right, y_bot, y_top, pad_frac=0.10)
 
         add_layer_legend(ax, loc="lower right", items=[
             (LAYER_COLORS["substrate"], "Substrate"),
             (LAYER_COLORS["copper"], "Top copper"),
             (_BOT_FACE, "Bottom ground (reflector)"),
         ])
-        ax.margins(0.06)
+        ax.margins(0.16)
 
     def plot_fields(self, ax, ctx, r):
         ax.text(0.5, 0.5, "Quasi-Yagi: end-fire along +x\n(see 3D / 2D Pattern tabs)",
@@ -330,6 +345,9 @@ class MicrostripQuasiYagi(AntennaBase):
 
 @register_antenna("Printed LPDA (PCB)", category="Patch")
 class PrintedLPDA(AntennaBase):
+    polarization = "linear  (E along the dipole arms)"
+    beam_axis = "end-fire along +X (toward short-element end)"
+    bandwidth_note = "wideband — set by longest/shortest dipole"
     notes = ("Log-periodic dipole array printed on a two-layer PCB. Twin-track "
              "transmission line runs the length of the board; each dipole has "
              "one arm on the top layer and one on the bottom, alternating every "
@@ -357,10 +375,10 @@ class PrintedLPDA(AntennaBase):
         fH  = float(params.get("f_high_GHz", "3.0")) * 1e9
         tau = float(params.get("tau",   "0.88"))
         sig = float(params.get("sigma", "0.16"))
-        W_strip = float(params.get("W_strip", "2.0")) * 1e-3
-        W_track = float(params.get("W_track", "1.5")) * 1e-3
-        gap_track = float(params.get("gap_track", "1.0")) * 1e-3
-        margin = float(params.get("margin", "4.0")) * 1e-3
+        W_strip   = ctx.m(params.get("W_strip", "2.0"))
+        W_track   = ctx.m(params.get("W_track", "1.5"))
+        gap_track = ctx.m(params.get("gap_track", "1.0"))
+        margin    = ctx.m(params.get("margin", "4.0"))
 
         # Printed dipole on PCB radiates at slightly lower frequency than in air
         # → arm length shorter by sqrt(er_eff). Use εr_eff ≈ (εr+1)/2 (half-space).
@@ -402,6 +420,11 @@ class PrintedLPDA(AntennaBase):
             "margin": margin,
             "x_left": x_left, "x_right": x_right,
             "y_top": y_top, "y_bot": y_bot,
+            "board_size": (x_right - x_left, y_top - y_bot),
+            "board_center_m": ((x_left + x_right) / 2, (y_top + y_bot) / 2),
+            "bandwidth": {"f_low_hz": fL, "f_high_hz": fH,
+                          "fractional": 2*(fH-fL)/(fH+fL),
+                          "note": "Wideband — set by longest/shortest dipole."},
         }
 
     def _summary_extra(self, ctx, r):
@@ -519,13 +542,14 @@ class PrintedLPDA(AntennaBase):
                            y_top - margin*0.35,
                            f"d₁₂ = {positions[1]-positions[0]:.1f}",
                            offset=0, color=LAYER_COLORS["dim_alt"])
-        # Twin-track width / gap via short leader labels
+        # Twin-track width / gap — label parked ABOVE the dipole envelope
+        # in the empty substrate margin so it doesn't sit on dipole arms.
         leader(ax, (boom*0.5, y_top_trk_hi),
-               (boom*0.5, y_top + margin*0.25),
-               f"W_track={W_track:.2f}")
-        leader(ax, (boom*0.5, 0.0),
-               (boom*0.5 + margin*0.8, -margin*0.25),
-               f"gap={gap_tr:.2f}")
+               (boom*0.5, y_top + margin*0.45),
+               f"W_track={W_track:.2f} / gap={gap_tr:.2f}")
+
+        # Overall board outline
+        dim_board(ax, x_left, x_right, y_bot, y_top, pad_frac=0.08)
 
         # Direction-of-peak-gain arrow — points RIGHT toward small elements
         beam_y = y_top - margin * 0.1
@@ -542,7 +566,7 @@ class PrintedLPDA(AntennaBase):
             (LAYER_COLORS["copper"], "Top copper"),
             (_BOT_FACE, "Bottom copper"),
         ])
-        ax.margins(0.04)
+        ax.margins(0.10)
 
     def plot_fields(self, ax, ctx, r):
         ax.text(0.5, 0.5,
