@@ -355,13 +355,12 @@ class AntennaBase:
         bc = results.get("board_center_m") or (0.0, 0.0)
         if curves and any(c.points_m for c in curves):
             lines.append("")
-            lines.append("DXF / spline export uses the board-centered frame")
+            lines.append("Both the DXF/spline export and the CST analytical")
+            lines.append("curves above are board-centred (centre of the")
+            lines.append("substrate sits at the origin).")
             if abs(bc[0]) > 1e-12 or abs(bc[1]) > 1e-12:
-                lines.append(f"  (shift Δx = {-bc[0]*m:.2f} {u}, "
-                             f"Δy = {-bc[1]*m:.2f} {u} from CAD-tab coords).")
-            lines.append(f"  The CST analytical expressions above use the "
-                         f"antenna's NATIVE frame so the math matches the "
-                         f"equations shown.")
+                lines.append(f"  CAD-tab → CST shift: Δx = {-bc[0]*m:.2f} {u}, "
+                             f"Δy = {-bc[1]*m:.2f} {u}")
 
         return "\n".join(lines)
 
@@ -531,6 +530,26 @@ class AntennaBase:
                 out.append(f"#   {s}")
         out.append("")
         return "\n".join(out) + "\n"
+
+    def export_cst_vba_macro(self, ctx: "Context", results: dict) -> str:
+        """Return a CST VBA macro for parametric assembly (or empty).
+
+        Antennas opt-in by populating `results['cst_vba_macro']` with a
+        ready-to-paste VBA snippet. Returns an empty string for antennas
+        that haven't supplied one (the menu entry surfaces this via a
+        message box rather than writing an empty file).
+        """
+        return results.get("cst_vba_macro", "") or ""
+
+    def export_cst_full_model_macro(self, ctx: "Context", results: dict) -> str:
+        """Return a CST macro that builds the whole tunable antenna model.
+
+        This is different from curve/DXF export: the generated CST history
+        stores dimensions in the Parameter List and creates solids with
+        symbolic ranges like ``"-L/2"``, so changing those CST parameters and
+        rebuilding updates the geometry.
+        """
+        return results.get("cst_full_model_macro", "") or ""
 
     def export_spline_txt(self, ctx: "Context", results: dict,
                           curve_index: Optional[int] = None,

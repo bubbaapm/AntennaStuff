@@ -2,6 +2,7 @@
 Aperture antennas — rectangular slot, bowtie, Vivaldi, pyramidal horn.
 """
 from __future__ import annotations
+from pathlib import Path as FsPath
 import numpy as np
 from matplotlib import patches as mpatches
 from matplotlib.path import Path as MPath
@@ -12,6 +13,152 @@ from plotting.cad import (
     LAYER_COLORS, style_ax, dim_horizontal, dim_vertical, dim_linear,
     angle_dim, leader, add_layer_legend, dim_board,
 )
+
+
+def _cst_ports_macro_dir() -> FsPath | None:
+    """Return CST's Solver/Ports macro folder when installed locally."""
+    candidates = [
+        FsPath(r"C:\Program Files (x86)\CST Studio Suite 2025\Library\Macros\Solver\Ports"),
+        FsPath(r"C:\Program Files\CST Studio Suite 2025\Library\Macros\Solver\Ports"),
+        FsPath(r"C:\Program Files (x86)\CST Studio Suite 2024\Library\Macros\Solver\Ports"),
+        FsPath(r"C:\Program Files\CST Studio Suite 2024\Library\Macros\Solver\Ports"),
+    ]
+    for path in candidates:
+        if (path / "Calculate port extension coefficient_MS_5GHz.txt").exists():
+            return path
+    return None
+
+
+def _load_cst_ms_port_table(path: FsPath) -> list[tuple[float, float, float]]:
+    """Load CST's microstrip port-extension table, using the 1% error column."""
+    rows: list[tuple[float, float, float]] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return rows
+    for line in lines[2:]:
+        parts = line.split()
+        if len(parts) >= 3:
+            try:
+                rows.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            except ValueError:
+                pass
+    return rows
+
+
+def _cst_table_value(rows: list[tuple[float, float, float]],
+                     er: float, wh: float) -> float | None:
+    for er_i, wh_i, k_i in rows:
+        if abs(er_i - er) < 1e-12 and abs(wh_i - wh) < 1e-12:
+            return k_i
+    return None
+
+
+def _tri_area(xa: float, ya: float, xb: float, yb: float,
+              xc: float, yc: float) -> float:
+    return abs((xb * ya - xa * yb) + (xc * yb - xb * yc) +
+               (xa * yc - xc * ya)) / 2
+
+
+def _cst_k_estimate(xp: float, yp: float,
+                    xa: float, ya: float, za: float,
+                    xb: float, yb: float, zb: float,
+                    xc: float, yc: float, zc: float) -> float | None:
+    pab = _tri_area(xp, yp, xa, ya, xb, yb)
+    pcb = _tri_area(xp, yp, xc, yc, xb, yb)
+    pac = _tri_area(xp, yp, xa, ya, xc, yc)
+    cab = _tri_area(xc, yc, xa, ya, xb, yb)
+    if cab <= 0 or (pab + pcb + pac) - cab >= cab / 1e6:
+        return None
+    a = ya * (zb - zc) + yb * (zc - za) + yc * (za - zb)
+    b = za * (xb - xc) + zb * (xc - xa) + zc * (xa - xb)
+    c = xa * (yb - yc) + xb * (yc - ya) + xc * (ya - yb)
+    d = xa * (yb * zc - yc * zb) + xb * (yc * za - ya * zc) + xc * (ya * zb - yb * za)
+    if abs(c) < 1e-12:
+        return None
+    return (-a * xp - b * yp + d) / c
+
+
+def _cst_interpolate_port_k(rows: list[tuple[float, float, float]],
+                            er: float, wh: float) -> float | None:
+    ers = sorted({r[0] for r in rows})
+    whs = sorted({r[1] for r in rows})
+    er_low = max((v for v in ers if v <= er), default=None)
+    er_high = min((v for v in ers if v >= er), default=None)
+    wh_low = max((v for v in whs if v <= wh), default=None)
+    wh_high = min((v for v in whs if v >= wh), default=None)
+    if er_low is None or er_high is None or wh_low is None or wh_high is None:
+        return None
+
+    if er_low == er_high and wh_low == wh_high:
+        return _cst_table_value(rows, er_low, wh_low)
+    if er_low == er_high:
+        k1 = _cst_table_value(rows, er_low, wh_low)
+        k2 = _cst_table_value(rows, er_low, wh_high)
+        if k1 is None or k2 is None or wh_high == wh_low:
+            return None
+        a = (k2 - k1) / (wh_high - wh_low)
+        return a * wh + (k1 - a * wh_low)
+    if wh_low == wh_high:
+        k1 = _cst_table_value(rows, er_low, wh_low)
+        k2 = _cst_table_value(rows, er_high, wh_low)
+        if k1 is None or k2 is None or er_high == er_low:
+            return None
+        a = (k2 - k1) / (er_high - er_low)
+        return a * er + (k1 - a * er_low)
+
+    k_ll = _cst_table_value(rows, er_low, wh_low)
+    k_hl = _cst_table_value(rows, er_high, wh_low)
+    k_lh = _cst_table_value(rows, er_low, wh_high)
+    k_hh = _cst_table_value(rows, er_high, wh_high)
+    if None in (k_ll, k_hl, k_lh, k_hh):
+        return None
+
+    k_c = (k_hh + k_ll) / 2 if (k_hh + k_ll) / 2 > (k_hl + k_lh) / 2 else (k_hl + k_lh) / 2
+    er_c = (er_low + er_high) / 2
+    wh_c = (wh_low + wh_high) / 2
+    triangles = (
+        (er_low, wh_low, k_ll, er_high, wh_low, k_hl),
+        (er_high, wh_low, k_hl, er_high, wh_high, k_hh),
+        (er_high, wh_high, k_hh, er_low, wh_high, k_lh),
+        (er_low, wh_high, k_lh, er_low, wh_low, k_ll),
+    )
+    for xa, ya, za, xb, yb, zb in triangles:
+        k = _cst_k_estimate(er, wh, er_c, wh_c, k_c, xa, ya, za, xb, yb, zb)
+        if k is not None:
+            return k
+    return None
+
+
+def _cst_microstrip_port_k(er: float, wh: float,
+                           fmin_ghz: float, fmax_ghz: float) -> float | None:
+    """Match CST's bundled microstrip port-extension k lookup."""
+    ports_dir = _cst_ports_macro_dir()
+    if ports_dir is None or wh <= 0:
+        return None
+    freq_names = {
+        0.1: "0.1GHz",
+        1.0: "1GHz",
+        2.0: "2GHz",
+        5.0: "5GHz",
+        10.0: "10GHz",
+        15.0: "15GHz",
+        20.0: "20GHz",
+    }
+    freqs = sorted(freq_names)
+    f_low = max((f for f in freqs if f <= fmin_ghz), default=0.0)
+    f_high = min((f for f in freqs if f >= fmax_ghz), default=1e6)
+    k_values = []
+    for freq in freqs:
+        if f_low <= freq <= f_high:
+            table = _load_cst_ms_port_table(
+                ports_dir / f"Calculate port extension coefficient_MS_{freq_names[freq]}.txt")
+            k = _cst_interpolate_port_k(table, er, wh)
+            if k is not None:
+                k_values.append(k)
+    if not k_values:
+        return None
+    return np.floor(max(k_values) * 100) / 100
 
 
 # ============================================================================
@@ -267,6 +414,17 @@ class Vivaldi(AntennaBase):
                   tooltip="¼ λ_g microstrip stub — classic virtual short."),
             Input("stub_angle", "Radial-stub sector half-angle (deg)", "45"),
             Input("feed_Z",     "Feed microstrip Z₀ (Ω)", "50"),
+            Input("feed_w_slot","Microstrip width at slot crossing (0 = no taper)",
+                  "0.0", unit="units",
+                  tooltip="Width of the vertical microstrip where it crosses "
+                          "the slot. Set narrower than W_feed for a linear "
+                          "impedance taper into the high-Z slotline (improves "
+                          "balun bandwidth). 0 → constant width."),
+            Input("miter_frac","Corner miter (fraction of W_feed, 0 = no miter)",
+                  "0.6",
+                  tooltip="Chamfer at the 90° L-bend, sized as a fraction of "
+                          "W_feed (Douville-James ≈ 0.5–0.6). Cuts excess "
+                          "corner capacitance so the bend stays at Z₀."),
             Input("feed_side",  "SMA connector side", "left",
                   choices=["left", "bottom"],
                   tooltip="Board edge the SMA sits on. 'left' = same side as the "
@@ -294,16 +452,19 @@ class Vivaldi(AntennaBase):
         # Exponential taper rate so y(L) = W_ap/2 starting from y(0) = w0/2
         R = np.log(W_ap / w0) / L
 
-        # Microstrip feed (balun) — uses ctx.fr as the design/center freq
-        feed = microstrip.synthesize(ctx.z0, ctx.er, ctx.h)
+        feed_Z     = float(params.get("feed_Z", "50"))
+        # Microstrip feed (balun) — uses ctx.fr as the design/center freq.
+        # This is intentionally Vivaldi-specific: the GUI exposes feed_Z as
+        # an antenna parameter, so use it here instead of the global ctx.z0.
+        feed = microstrip.synthesize(feed_Z, ctx.er, ctx.h)
         # Slotline guide wavelength (rough): εr_slot ≈ (εr + 1)/2
         er_slot = (ctx.er + 1) / 2
         lam_g_slot_at_fr   = C_LIGHT / (ctx.fr * np.sqrt(er_slot))
         lam_g_slot_at_fL   = C_LIGHT / (fL   * np.sqrt(er_slot))
         lam_g_strip        = C_LIGHT / (ctx.fr * np.sqrt(feed["Ereff"]))
 
-        # Feed crosses the slotline at λ_g_slot/4 from cavity center — this
-        # maximizes bandwidth of the balun.
+        # Feed crosses the slotline at λ_g_slot/4 from the throat / cavity
+        # junction. The board-centered CST export later subtracts center_x.
         feed_cross_x = lam_g_slot_at_fr / 4
 
         cavity_dia = ctx.m_or(params.get("cavity_dia"),
@@ -311,7 +472,16 @@ class Vivaldi(AntennaBase):
         stub_ratio = float(params.get("stub_ratio", "0.25"))
         stub_angle = float(params.get("stub_angle", "45"))
         stub_len   = stub_ratio * lam_g_strip
-        feed_Z     = float(params.get("feed_Z", "50"))
+        # Vertical microstrip width at the slot crossing. 0 → same as W_feed
+        # (no taper). Used to improve match to the high-impedance slotline.
+        feed_w_slot = ctx.m(params.get("feed_w_slot", "0.0"))
+        if feed_w_slot <= 0 or feed_w_slot > feed["W"]:
+            feed_w_slot = feed["W"]
+        try:
+            miter_frac = float(params.get("miter_frac", "0.6"))
+        except (TypeError, ValueError):
+            miter_frac = 0.6
+        miter_frac = max(0.0, min(0.9, miter_frac))
         feed_side  = str(params.get("feed_side", "left")).strip().lower()
         if feed_side not in ("left", "bottom"):
             feed_side = "left"
@@ -341,11 +511,45 @@ class Vivaldi(AntennaBase):
         slot_w_feed = min(w0 * np.exp(R * feed_cross_x), W_ap)
 
         # Microstrip feed-trace run length on the bottom layer.
+        # y_run is the y-coordinate of the horizontal microstrip run. It
+        # sits below the slot at ~55 % of the board half-height so the
+        # SMA pad clears the slot's lower edge.
+        W_h = feed["W"]                                # horizontal width
+        W_v = feed_w_slot                              # width at slot crossing
         if feed_side == "left":
-            y_run    = 0.55 * (board_wid / 2)
-            feed_len = (feed_cross_x - cav_left + m_back) + y_run
+            y_run_pos = 0.55 * (board_wid / 2)
+            y_run     = -y_run_pos                     # actual y, below origin
+            feed_len  = (feed_cross_x - cav_left + m_back) + y_run_pos
         else:
-            feed_len = board_wid / 2
+            y_run     = -board_wid / 2                 # bottom edge
+            feed_len  = board_wid / 2
+
+        miter_d = miter_frac * W_h
+        # Build the L-shaped feed polygon (CCW) in NATIVE plot coords.
+        # Outer corner is bottom-right; miter chamfers it. Vertical tapers
+        # linearly from W_h at the corner-top to W_v at the slot.
+        feed_poly = []
+        if feed_side == "left":
+            feed_poly.append((cav_left - m_back, y_run + W_h/2))             # 1: top-left at SMA
+            feed_poly.append((feed_cross_x - W_h/2, y_run + W_h/2))           # 2: inner-corner top
+            feed_poly.append((feed_cross_x - W_v/2, 0.0))                     # 3: tapered to slot (left)
+            feed_poly.append((feed_cross_x + W_v/2, 0.0))                     # 4: tapered to slot (right)
+            feed_poly.append((feed_cross_x + W_h/2, y_run + W_h/2))           # 5: back down to corner top (outer)
+            if miter_d > 0:
+                feed_poly.append((feed_cross_x + W_h/2, y_run - W_h/2 + miter_d))
+                feed_poly.append((feed_cross_x + W_h/2 - miter_d, y_run - W_h/2))
+            else:
+                feed_poly.append((feed_cross_x + W_h/2, y_run - W_h/2))      # outer corner (no miter)
+            feed_poly.append((cav_left - m_back, y_run - W_h/2))             # bottom-left at SMA
+        else:
+            # Bottom-feed: straight vertical microstrip from board bottom up
+            # to the slot. Tapered if W_v != W_h, no corner so no miter.
+            feed_poly = [
+                (feed_cross_x - W_h/2, y_run),
+                (feed_cross_x - W_v/2, 0.0),
+                (feed_cross_x + W_v/2, 0.0),
+                (feed_cross_x + W_h/2, y_run),
+            ]
 
         # Quick sanity checks
         warn = []
@@ -399,8 +603,8 @@ class Vivaldi(AntennaBase):
                 points_m=[(float(x), float(y)) for x, y in zip(xs, y_upper)],
                 note="The lower edge is the mirror y_lower(x) = −y_upper(x).",
                 cst={
-                    "x_t":  "t",
-                    "y_t":  "min((w0/2)*exp(R*t), W_ap/2)",
+                    "x_t":  "t - center_x",
+                    "y_t":  "(w0/2)*exp((ln(W_ap/w0)/L)*t)",
                     "z_t":  "0",
                     "t_min": "0",
                     "t_max": "L",
@@ -410,7 +614,7 @@ class Vivaldi(AntennaBase):
             ),
             Curve(
                 name="Lower taper edge (mirror of upper)",
-                equation="y_lower(x) = −(w0/2) · exp(R · x),  clipped to −W_ap/2",
+                equation="y_lower(x) = −(w0/2) · exp(R · x)",
                 parameters={
                     "w0":   (w0,   "m"),
                     "R":    (R,    "1/m"),
@@ -419,8 +623,8 @@ class Vivaldi(AntennaBase):
                 },
                 points_m=[(float(x), float(-y)) for x, y in zip(xs, y_upper)],
                 cst={
-                    "x_t":  "t",
-                    "y_t":  "-min((w0/2)*exp(R*t), W_ap/2)",
+                    "x_t":  "t - center_x",
+                    "y_t":  "-(w0/2)*exp((ln(W_ap/w0)/L)*t)",
                     "z_t":  "0",
                     "t_min": "0",
                     "t_max": "L",
@@ -435,7 +639,7 @@ class Vivaldi(AntennaBase):
                 points_m=[(float(L), float(-W_ap/2)),
                           (float(L), float( W_ap/2))],
                 cst={
-                    "x_t":  "L",
+                    "x_t":  "L - center_x",
                     "y_t":  "t",
                     "z_t":  "0",
                     "t_min": "-W_ap/2",
@@ -447,20 +651,20 @@ class Vivaldi(AntennaBase):
             ),
             Curve(
                 name="Back-cavity arc (back side only)",
-                equation=("(x − cav_cx)² + y² = cav_r²,  arc from (0,−w0/2) "
-                          "around the back to (0,+w0/2)"),
+                equation=("(x − cav_cx)² + y² = cav_rad²,  arc from "
+                          "(0,−w0/2) around the back to (0,+w0/2)"),
                 parameters={
-                    "cav_cx": (cav_cx, "m"),
-                    "cav_r":  (cav_r,  "m"),
-                    "a0":     (a0,     "rad"),
+                    "cav_cx":  (cav_cx, "m"),
+                    "cav_rad": (cav_r,  "m"),
+                    "a0":      (a0,     "rad"),
                 },
                 points_m=cav_back_pts,
                 cst={
-                    "x_t":  "cav_cx + cav_r*cos(t)",
-                    "y_t":  "cav_r*sin(t)",
+                    "x_t":  "-sqrt(cav_rad^2 - (w0/2)^2) + cav_rad*cos(t) - center_x",
+                    "y_t":  "cav_rad*sin(t)",
                     "z_t":  "0",
-                    "t_min": "a0",
-                    "t_max": "2*pi - a0",
+                    "t_min": "asin(w0/(2*cav_rad))",
+                    "t_max": "2*pi - asin(w0/(2*cav_rad))",
                     "t_unit": "rad",
                 },
                 note=("Component of the closed slot+cavity boundary. "
@@ -470,16 +674,16 @@ class Vivaldi(AntennaBase):
             ),
             Curve(
                 name="Back-cavity circle (full, for reference)",
-                equation="(x − cav_cx)² + y² = cav_r²",
+                equation="(x − cav_cx)² + y² = cav_rad²",
                 parameters={
-                    "cav_cx": (cav_cx, "m"),
-                    "cav_r":  (cav_r,  "m"),
+                    "cav_cx":  (cav_cx, "m"),
+                    "cav_rad": (cav_r,  "m"),
                 },
                 points_m=cav_pts,
                 closed=True,
                 cst={
-                    "x_t":  "cav_cx + cav_r*cos(t)",
-                    "y_t":  "cav_r*sin(t)",
+                    "x_t":  "-sqrt(cav_rad^2 - (w0/2)^2) + cav_rad*cos(t) - center_x",
+                    "y_t":  "cav_rad*sin(t)",
                     "z_t":  "0",
                     "t_min": "0",
                     "t_max": "2*pi",
@@ -491,6 +695,71 @@ class Vivaldi(AntennaBase):
                 dxf_combined=False,
             ),
         ]
+
+        # ---- Microstrip feed polygon (bottom-layer copper) ----------------
+        curves.append(Curve(
+            name="Microstrip feed (bottom layer)",
+            equation=("L-shaped microstrip on the BOTTOM layer (z = −h). "
+                      "Horizontal run width W_feed; vertical tapers from "
+                      "W_feed at the corner to feed_w_slot at the slotline "
+                      "crossing; 45° miter at the outer corner."),
+            parameters={
+                "W_feed":      (feed["W"],   "m"),
+                "feed_w_slot": (W_v,         "m"),
+                "miter_d":     (miter_d,     "m"),
+                "feed_cross_x":(feed_cross_x,"m"),
+                "y_run":       (y_run,       "m"),
+            },
+            points_m=feed_poly,
+            closed=True,
+            note=("Drop on the BOTTOM copper layer (z = −h). Pair with the "
+                  "radial stub at the slot crossing (= virtual short → "
+                  "broadband balun). Tapered vertical impedance-matches the "
+                  "high-Z slotline; mitred corner compensates the L-bend "
+                  "capacitance so the bend stays at Z₀."),
+        ))
+
+        # ---- Radial stub (bottom-layer copper, virtual short at slot) -----
+        # Sector polygon with a FINITE apex of width W_v sharing the same
+        # edge as the microstrip's top side at y=0. The apex would be a
+        # single point (and create a zero-width connection to the
+        # microstrip — bad for meshing AND physically unrealistic) if we
+        # drew it from a true apex. Instead the base of the sector is the
+        # microstrip-width segment, and the sector sides come in tangent
+        # to the arc from the two corners of that segment.
+        stub_half = np.radians(stub_angle)
+        theta_c   = np.pi / 2.0                       # opens upward
+        n_arc     = 60
+        stub_arc_angles = np.linspace(theta_c - stub_half,
+                                      theta_c + stub_half, n_arc)
+        # Two apex corners (shared with microstrip top edge)
+        apex_L = (float(feed_cross_x - W_v / 2), 0.0)
+        apex_R = (float(feed_cross_x + W_v / 2), 0.0)
+        # Arc points centred on the slot crossing
+        arc_pts = [(float(feed_cross_x + stub_len * np.cos(a)),
+                    float(stub_len * np.sin(a))) for a in stub_arc_angles]
+        # CCW traversal: right apex corner → arc (CCW from -half to +half
+        # at theta_c) → left apex corner → close to right
+        stub_pts = [apex_R] + arc_pts + [apex_L]
+        curves.append(Curve(
+            name="Radial stub (bottom layer)",
+            equation=("sector centred at the slot crossing, radius stub_r, "
+                      "full sector angle = stub_ang°, opening towards +Y, "
+                      "with apex of width W_v shared with microstrip top"),
+            parameters={
+                "stub_r":      (stub_len,      "m"),
+                "stub_ang":    (2 * stub_angle, "deg"),
+                "feed_cross_x":(feed_cross_x,  "m"),
+                "feed_w_slot": (W_v,           "m"),
+            },
+            points_m=stub_pts,
+            closed=True,
+            note=("Bottom-layer copper, union it with the L-feed. Apex is a "
+                  "W_v-wide line segment shared with the microstrip top edge "
+                  "so the Boolean union creates a real-width connection (no "
+                  "zero-width contact). Virtual short at the slot — ¼-λ "
+                  "stub with wider bandwidth than a straight-line stub."),
+        ))
 
         # ---- Recommended: full slot+cavity boundary as one closed loop -----
         # Upper taper forward → vertical right edge → lower taper reversed →
@@ -510,7 +779,7 @@ class Vivaldi(AntennaBase):
                 "W_ap": (W_ap, "m"),
                 "w0":   (w0,   "m"),
                 "R":    (R,    "1/m"),
-                "cav_r":  (cav_r,  "m"),
+                "cav_rad":(cav_r,  "m"),
                 "cav_cx": (cav_cx, "m"),
             },
             points_m=slot_boundary,
@@ -521,6 +790,42 @@ class Vivaldi(AntennaBase):
                   "loop so the slot and cavity are a single opening — "
                   "no second subtraction needed."),
         ))
+
+        full_model_defaults = {
+            "_unit":        ctx.unit_str,
+            "fr_GHz":       ctx.fr / 1e9,
+            "f_low_GHz":    fL / 1e9,
+            "f_high_GHz":   fH / 1e9,
+            "er":           ctx.er,
+            "tan_d":        ctx.loss_tangent,
+            "L":            L * mu,
+            "W_ap":         W_ap * mu,
+            "w0":           w0 * mu,
+            "cav_rad":      cav_r * mu,
+            "h":            ctx.h * mu,
+            "t_cu":         0.035e-3 * mu,
+            "W_feed":       feed["W"] * mu,
+            "feed_w_slot":  W_v * mu,
+            "miter_d":      miter_d * mu,
+            "stub_r":       stub_len * mu,
+            "stub_ang":     stub_angle * 2,
+            "m_back":       m_back * mu,
+            "m_side":       m_side * mu,
+            "board_L":      board_len * mu,
+            "board_W":      board_wid * mu,
+            "center_x":     ((L + cav_left - m_back) / 2) * mu,
+            "x_cross":      (feed_cross_x -
+                             ((L + cav_left - m_back) / 2)) * mu,
+            "y_run":        (y_run if feed_side == "left"
+                             else -board_wid / 2) * mu,
+            "x_sma":        ((cav_left - m_back) -
+                             ((L + cav_left - m_back) / 2)) * mu,
+            "port_margin":  1.5 * feed["W"] * mu,
+        }
+        port_k = _cst_microstrip_port_k(
+            ctx.er, feed["W"] / ctx.h, fL / 1e9, fH / 1e9)
+        if port_k is not None:
+            full_model_defaults["port_k"] = port_k
 
         bandwidth = {
             "f_low_hz":  fL,
@@ -542,6 +847,8 @@ class Vivaldi(AntennaBase):
             "f_low": fL, "f_high": fH,
             "m_back": m_back, "m_side": m_side,
             "slot_w_feed": slot_w_feed, "feed_len": feed_len,
+            "feed_w_slot": W_v, "miter_d": miter_d,
+            "feed_poly": feed_poly,
             # board_size = (X_extent, Y_extent) in metres, matching CAD axes.
             # For the Vivaldi the taper opens along +X, so the long side is X.
             "board_size": (board_len, board_wid),
@@ -554,74 +861,782 @@ class Vivaldi(AntennaBase):
             # ---- Math & CST parametric recipe -----------------------------
             "math_equations": [
                 ("Exponential taper",
-                 "y(x) = ±(w0/2) · exp(R · x),   clipped to ±W_ap/2"),
-                ("Taper rate",
+                 "y(x) = ±(w0/2) · exp(R · x)"),
+                ("Taper rate (auto-derived from aperture spec)",
                  "R = ln(W_ap / w0) / L"),
                 ("Back-cavity circle",
-                 "(x − cav_cx)² + y² = cav_r²"),
-                ("Cavity centre (so the cavity passes through (0, ±w0/2))",
-                 "cav_cx = −√(cav_r² − (w0/2)²)"),
+                 "(x − cav_cx)² + y² = cav_rad²"),
+                ("Cavity centre (cavity passes through (0, ±w0/2))",
+                 "cav_cx = −√(cav_rad² − (w0/2)²)"),
                 ("Cavity-throat angle",
-                 "a0 = arcsin(w0 / (2·cav_r))"),
-                ("Microstrip-to-slotline crossing (λ/4 of slotline at fr)",
-                 "x_cross = λ_g_slot / 4  with  λ_g_slot = c / (fr·√((εr+1)/2))"),
+                 "a0 = arcsin(w0 / (2·cav_rad))"),
+                ("Microstrip-to-slotline crossing (λ_g_slot/4 at fr)",
+                 "x_cross = c / (4·fr·√((εr+1)/2))"),
+                ("Overall board length",
+                 "board_L = L − (cav_cx − cav_rad) + m_back"),
+                ("Overall board width",
+                 "board_W = W_ap + 2·m_side"),
             ],
             "cst_parameters": {
-                # --- base (user-tunable) ---
-                "L":      {"value": L * mu,           "unit": ctx.unit_str,
-                           "comment": "Taper length"},
-                "W_ap":   {"value": W_ap * mu,        "unit": ctx.unit_str,
-                           "comment": "Aperture (mouth) width"},
-                "w0":     {"value": w0 * mu,          "unit": ctx.unit_str,
-                           "comment": "Throat (slotline) width"},
-                "R":      {"value": R / mu,           "unit": f"1/{ctx.unit_str}",
-                           "comment": "Exponential taper rate"},
-                "cav_r":  {"value": cav_r * mu,       "unit": ctx.unit_str,
-                           "comment": "Back-cavity radius"},
-                "h":      {"value": ctx.h * mu,       "unit": ctx.unit_str,
-                           "comment": "Substrate thickness"},
-                "er":     {"value": ctx.er,           "unit": "",
-                           "comment": "Substrate relative permittivity"},
-                "W_feed": {"value": feed["W"] * mu,   "unit": ctx.unit_str,
-                           "comment": "Microstrip feed width (Z0 = "
-                                      f"{feed_Z:.0f} Ω)"},
-                "m_back": {"value": m_back * mu,      "unit": ctx.unit_str,
-                           "comment": "Substrate margin behind cavity"},
-                "m_side": {"value": m_side * mu,      "unit": ctx.unit_str,
-                           "comment": "Substrate margin beside taper"},
-                # --- derived (formulas, plus the value the formula evaluates
-                #     to so the user can sanity-check after pasting) ---
-                "cav_cx": {"formula": "-sqrt(cav_r^2 - (w0/2)^2)",
-                           "value":  cav_cx * mu,
-                           "unit":   ctx.unit_str,
-                           "comment": "Cavity centre x"},
-                "a0":     {"formula": "asin(w0/(2*cav_r))",
-                           "value":  a0,
-                           "unit":   "rad",
-                           "comment": "Cavity-throat angle"},
-                "board_L":{"formula": "L - (cav_cx - cav_r) + m_back",
-                           "value":  board_len * mu,
-                           "unit":   ctx.unit_str,
-                           "comment": "Total board length"},
-                "board_W":{"formula": "W_ap + 2*m_side",
-                           "value":  board_wid * mu,
-                           "unit":   ctx.unit_str,
-                           "comment": "Total board width"},
+                # CST's parameter-list expressions don't accept function
+                # calls like sqrt() / asin() / ln(), so we keep the list to
+                # plain values plus simple-arithmetic derived entries. The
+                # transcendental formulas (R, cav_cx, throat angle) are
+                # INLINED into the analytical-curve expressions in Step 2 —
+                # that way tuning L, W_ap, w0, or cav_rad still propagates
+                # automatically because the analytical-curve parser DOES
+                # support those functions.
+                "L":       {"value": L * mu,          "unit": ctx.unit_str,
+                            "comment": "Taper length"},
+                "W_ap":    {"value": W_ap * mu,       "unit": ctx.unit_str,
+                            "comment": "Aperture (mouth) width"},
+                "w0":      {"value": w0 * mu,         "unit": ctx.unit_str,
+                            "comment": "Throat (slotline) width"},
+                "cav_rad": {"value": cav_r * mu,      "unit": ctx.unit_str,
+                            "comment": "Back-cavity radius "
+                                       "(named cav_rad, NOT cav_r — "
+                                       "cav_r is reserved in CST/VBA)"},
+                "h":       {"value": ctx.h * mu,      "unit": ctx.unit_str,
+                            "comment": "Substrate thickness"},
+                "er":      {"value": ctx.er,          "unit": "",
+                            "comment": "Substrate relative permittivity"},
+                "W_feed":  {"value": feed["W"] * mu,  "unit": ctx.unit_str,
+                            "comment": "Microstrip feed width — horizontal "
+                                       f"run (Z0 = {feed_Z:.0f} Ω)"},
+                "feed_w_slot":
+                           {"value": W_v * mu,        "unit": ctx.unit_str,
+                            "comment": "Microstrip width at slot crossing "
+                                       "(vertical tapers W_feed → "
+                                       "feed_w_slot)"},
+                "miter_d": {"value": miter_d * mu,    "unit": ctx.unit_str,
+                            "comment": "45° chamfer at the outer L-bend "
+                                       "(≈ 0.5–0.6·W_feed; cancels bend "
+                                       "capacitance)"},
+                "stub_r":  {"value": stub_len * mu,   "unit": ctx.unit_str,
+                            "comment": "Radial stub radius (virtual short "
+                                       "at the slot)"},
+                "stub_ang":{"value": stub_angle * 2,  "unit": "deg",
+                            "comment": "Radial stub full sector angle"},
+                "m_back":  {"value": m_back * mu,     "unit": ctx.unit_str,
+                            "comment": "Substrate margin behind cavity"},
+                "m_side":  {"value": m_side * mu,     "unit": ctx.unit_str,
+                            "comment": "Substrate margin beside taper"},
+                # --- derived (simple arithmetic only — no functions) ------
+                "board_W":  {"formula": "W_ap + 2*m_side",
+                             "value":   board_wid * mu,
+                             "unit":    ctx.unit_str,
+                             "comment": "Total board width"},
+                # board_L needs sqrt() to be truly parametric, so it stays
+                # a value. Update it manually (or rebuild the recipe) if
+                # you retune w0 / cav_rad / m_back.
+                "board_L":  {"value":   board_len * mu,
+                             "unit":    ctx.unit_str,
+                             "comment": "Total board length  "
+                                        "(= L + sqrt(cav_rad^2 - (w0/2)^2) "
+                                        "+ cav_rad + m_back)"},
+                # center_x shifts the analytical curves onto a board you
+                # built centred on the origin. Simple arithmetic, so CST's
+                # parameter list accepts the formula and it stays parametric
+                # with L.
+                "center_x": {"formula": "L - board_L/2",
+                             "value":   ((L + cav_left - m_back) / 2) * mu,
+                             "unit":    ctx.unit_str,
+                             "comment": "X-offset that maps native-frame "
+                                        "curves onto a board centred at "
+                                        "the origin"},
+                # ---- Feed/stub placement (board-centered frame) -----------
+                # These are stored as plain values (not formulas) so they're
+                # sweep-friendly — the user typically tunes x_cross / y_run
+                # to optimise the balun match.
+                "x_cross": {"value":   (feed_cross_x -
+                                        ((L + cav_left - m_back) / 2)) * mu,
+                            "unit":    ctx.unit_str,
+                            "comment": "X of microstrip↔slot crossing "
+                                       "(board-centered). ≈ λ_g_slot/4 from "
+                                       "cavity. SWEEP THIS to tune the "
+                                       "balun centre frequency."},
+                "y_run":   {"value":   (y_run if feed_side == "left"
+                                        else -board_wid / 2) * mu,
+                            "unit":    ctx.unit_str,
+                            "comment": "Y of horizontal microstrip run "
+                                       "(board-centered). Negative = below "
+                                       "the slot."},
+                "x_sma":   {"value":   ((cav_left - m_back) -
+                                        ((L + cav_left - m_back) / 2)) * mu,
+                            "unit":    ctx.unit_str,
+                            "comment": "Left edge of microstrip "
+                                       "(board-centered) — SMA pad sits here "
+                                       "for the 'left' feed layout."},
+                "port_margin":
+                           {"value":   1.5 * feed["W"] * mu,
+                            "unit":    ctx.unit_str,
+                            "comment": "Waveguide-port margin around the "
+                                       "microstrip launch. Increase if CST "
+                                       "warns the port is too tightly clipped."},
+                "t_cu":    {"value":   0.035e-3 * mu,
+                            "unit":    ctx.unit_str,
+                            "comment": "Copper thickness (default 1 oz ≈ "
+                                       "0.035 mm). Used by the VBA macro "
+                                       "for extruding the bottom layer."},
             },
+            "cst_vba_macro": self._build_cst_vba_macro(feed_side, {
+                # Values used as defaults inside the macro's EnsureParam
+                # calls — must be expressed in the user's display units
+                # because CST's parameter list is unitless and the project
+                # uses ctx.unit_str globally.
+                "h":            ctx.h * mu,
+                "t_cu":         0.035e-3 * mu,
+                "W_feed":       feed["W"] * mu,
+                "feed_w_slot":  W_v * mu,
+                "miter_d":      miter_d * mu,
+                "stub_r":       stub_len * mu,
+                "stub_ang":     stub_angle * 2,
+                "x_cross":      (feed_cross_x -
+                                 ((L + cav_left - m_back) / 2)) * mu,
+                "y_run":        (y_run if feed_side == "left"
+                                 else -board_wid / 2) * mu,
+                "x_sma":        ((cav_left - m_back) -
+                                 ((L + cav_left - m_back) / 2)) * mu,
+                "port_margin":  1.5 * feed["W"] * mu,
+            }),
+            "cst_full_model_macro": self._build_cst_full_model_macro(
+                feed_side, full_model_defaults),
             "cst_recipe_steps": [
+                "TOP LAYER (slot in the ground plane)",
                 "1) Build the ground-plane copper rectangle of size "
-                "board_L × board_W centred on the origin (or wherever).",
-                "2) Build all five analytical curves above.",
-                "3) Curves ▸ Join Curves: upper_taper → aperture_right_edge "
-                "→ lower_taper (reversed) → cavity_arc.  This makes one "
-                "closed loop.",
-                "4) Curves ▸ Cover Curve on that loop → one face.",
-                "5) Boolean ▸ Subtract that face from the ground-plane "
-                "copper.  Done.",
-                "   (Now you can sweep L, W_ap, w0, R, cav_r, … and CST "
-                "re-meshes automatically.)",
+                "board_L × board_W on the TOP face of the substrate, "
+                "centred on the origin.",
+                "2) Build the four slot-boundary analytical curves above "
+                "(upper_taper, lower_taper, aperture_right_edge, "
+                "back_cavity_arc).",
+                "3) Curves ▸ Join Curves to make one closed loop, then "
+                "Cover Curve to make a face.",
+                "4) Boolean ▸ Subtract that face from the ground-plane "
+                "copper.  The slot+cavity opening is now etched.",
+                "",
+                "BOTTOM LAYER (microstrip feed + radial stub)",
+                "5) RECOMMENDED: File ▸ Export geometry ▸ CST VBA macro… "
+                "and paste the resulting macro into CST's History List. "
+                "It builds the L-feed polygon (taper + miter) and the "
+                "radial-stub sector parametrically from x_cross, W_feed, "
+                "feed_w_slot, miter_d, stub_r, stub_ang, then creates "
+                "Port 1 from free coordinates at the feed launch. Use that "
+                "port instead of picking the feed edge face; face-pick "
+                "history is brittle after parameter rebuilds.",
+                "6) MANUAL FALLBACK: import the bottom-layer DXF curves "
+                "(feed + stub), Cover Curve on each, Union together. Faster "
+                "to set up but you'll lose parametric tunability.",
+                "",
+                "Now sweep any base parameter (L, W_ap, w0, cav_rad, "
+                "W_feed, feed_w_slot, miter_d, stub_r, …) and CST re-meshes "
+                "automatically. center_x updates via L − board_L/2 so the "
+                "curves stay on the board.",
             ],
         }
+
+    def _build_cst_vba_macro(self, feed_side: str,
+                              defaults: dict | None = None) -> str:
+        """Return a CST VBA macro that builds the bottom-layer feed + stub
+        parametrically. References CST parameter names so sweeping
+        x_cross / W_feed / feed_w_slot / etc. rebuilds the geometry.
+
+        `defaults` is {param_name: numeric_value_in_display_units} — used
+        at the top of the macro to call EnsureParam(name, default). Any
+        parameter already present in the user's CST project keeps its
+        existing value; missing ones are created with the default.
+
+        Uses CST's documented Line + Arc + ExtrudeCurve idiom (see CST's
+        built-in 'Construct/Solids/Radial Stub' macro for reference).
+        """
+        defaults = defaults or {}
+        # Order parameters in a sensible "read top-to-bottom" sequence
+        # so the new entries make sense in CST's parameter list.
+        param_order = [
+            ("h",            "Substrate thickness"),
+            ("t_cu",         "Copper layer thickness (1 oz default)"),
+            ("W_feed",       "Microstrip width, horizontal run"),
+            ("feed_w_slot",  "Microstrip width at the slot crossing"),
+            ("miter_d",      "Outer L-bend chamfer depth"),
+            ("stub_r",       "Radial-stub radius"),
+            ("stub_ang",     "Radial-stub full sector angle (deg)"),
+            ("x_cross",      "Slot-crossing x (board-centered)"),
+            ("y_run",        "Horizontal-run y (board-centered)"),
+            ("x_sma",        "SMA pad x (board-centered)"),
+            ("port_margin",  "Waveguide-port margin around the launch"),
+        ]
+
+        out = []
+        out.append("' " + "=" * 70)
+        out.append("' Vivaldi bottom-layer feed + radial stub")
+        out.append("' Generated by Antenna Designer")
+        out.append("' " + "=" * 70)
+        out.append("'")
+        out.append("' The macro is self-contained — it AUTO-CREATES any missing")
+        out.append("' parameters (with the values you exported from the GUI).")
+        out.append("' If a parameter already exists in your CST project, your")
+        out.append("' value wins. So you can paste-and-run on a blank project,")
+        out.append("' OR onto a project where you've already tweaked some of")
+        out.append("' the knobs by hand.")
+        out.append("'")
+        out.append("' Project units MUST match what you exported in (the")
+        out.append("' default values below assume the same unit system).")
+        out.append("'")
+        out.append("' How to run:")
+        out.append("'   Macros > Edit/Run VBA Macro... > paste this whole file,")
+        out.append("'   click Run.   OR  save as .bas and use Macros > Run Macro.")
+        out.append("'")
+        out.append("' Tunable knobs (sweep any of these in CST's Parameter List")
+        out.append("' after the macro runs and the bottom layer rebuilds):")
+        out.append("'   x_cross       - slot-crossing position (balun centre freq)")
+        out.append("'   stub_r        - radial-stub radius (virtual-short freq)")
+        out.append("'   stub_ang      - sector full angle, deg (balun bandwidth)")
+        out.append("'   feed_w_slot   - microstrip width at slot (Z-match)")
+        out.append("'   W_feed        - main microstrip width (Z0)")
+        out.append("'   miter_d       - corner chamfer (bend compensation)")
+        out.append("'   port_margin   - extra waveguide-port clearance around launch")
+        out.append("'")
+        out.append("")
+        out.append("Sub Main ()")
+        out.append("")
+        out.append("' " + "=" * 60)
+        out.append("' VERTICAL PLACEMENT — set at runtime via dialog")
+        out.append("' " + "=" * 60)
+        out.append("'")
+        out.append("' A dialog pops up so you can type the expression that gives")
+        out.append("' the z-coordinate where the TOP face of the bottom copper sits.")
+        out.append("' The copper extrudes DOWNWARD by t_cu from there.")
+        out.append("'")
+        out.append("' To skip the prompt on future runs, just hard-code the line")
+        out.append("' Z_FEED_TOP = \"...\" with whatever you ended up using.")
+        out.append("'")
+        out.append("Dim Z_FEED_TOP As String")
+        out.append("Dim defaultZ As String")
+        out.append("Dim probeMaskH As Double")
+        out.append("On Error Resume Next")
+        out.append('probeMaskH = RestoreDoubleParameter("mask_h")')
+        out.append("If Err.Number = 0 Then")
+        out.append('    defaultZ = "mask_h + t_cu"')
+        out.append("Else")
+        out.append("    Err.Clear")
+        out.append('    defaultZ = "-h"')
+        out.append("End If")
+        out.append("On Error Goto 0")
+        out.append("")
+        out.append("' Resolve t_cu to a numeric value for ExtrudeCurve.Thickness")
+        out.append("' (CST's ExtrudeCurve expects a Double for Thickness, not a")
+        out.append("' string expression — passing strings caused the extrude to")
+        out.append("' go the wrong direction in earlier macro versions.)")
+        out.append("Dim tCuVal As Double")
+        out.append('tCuVal = RestoreDoubleParameter("t_cu")')
+        out.append("")
+        out.append("Z_FEED_TOP = InputBox( _")
+        out.append('    "Where should the TOP face of the bottom copper sit?" & vbCrLf & _')
+        out.append('    "(The copper then extrudes DOWNWARD by t_cu from there,)" & vbCrLf & _')
+        out.append('    "(so its bottom ends up at Z_FEED_TOP - t_cu.)" & vbCrLf & vbCrLf & _')
+        out.append('    "Examples (type any CST expression):" & vbCrLf & _')
+        out.append('    "   0                 substrate sits at [0, h]" & vbCrLf & _')
+        out.append('    "   -h                substrate sits at [-h, 0]" & vbCrLf & _')
+        out.append('    "   mask_h            substrate sits at [mask_h, ...]" & vbCrLf & _')
+        out.append('    "   mask_h + t_cu     substrate sits at [mask_h+t_cu, ...]" & vbCrLf & vbCrLf & _')
+        out.append('    "Tip: it''s the SAME value as the z-coordinate of the bottom face" & vbCrLf & _')
+        out.append('    "of your substrate solid. Easy way to check: pick that face in CST.", _')
+        out.append('    "Vivaldi - Bottom Copper Placement", _')
+        out.append("    defaultZ)")
+        out.append("")
+        out.append('If Z_FEED_TOP = "" Then')
+        out.append('    MsgBox "Cancelled. No copper was built."')
+        out.append("    Exit Sub")
+        out.append("End If")
+        out.append("")
+        out.append("' ExtrudeCurve in this CST version places the extruded solid")
+        out.append("' with its BOTTOM at the curve plane (not the top), regardless")
+        out.append("' of Thickness sign. So to land the copper TOP at Z_FEED_TOP,")
+        out.append("' we translate by (Z_FEED_TOP - t_cu).")
+        out.append("Dim translateZ As String")
+        out.append('translateZ = "(" & Z_FEED_TOP & ") - t_cu"')
+        out.append("Dim portZMin As String")
+        out.append("Dim portZMax As String")
+        out.append('portZMin = "(" & Z_FEED_TOP & ") - t_cu"')
+        out.append('portZMax = "(" & Z_FEED_TOP & ") + h"')
+        out.append("")
+        out.append("' --- Ensure feed/stub geometry parameters exist (idempotent")
+        out.append("'     — won't clobber any value you've already entered) ---")
+        for name, comment in param_order:
+            if name not in defaults:
+                continue
+            val = defaults[name]
+            out.append(f'EnsureParam "{name}", {val:.6g}   \' {comment}')
+        out.append("")
+        out.append("WCS.ActivateWCS \"global\"")
+        out.append("")
+
+        # ============================================================
+        # 1. Combined feed + stub as ONE closed polygon
+        # ============================================================
+        # The stub's apex line is REPLACED by the arc + two radial sides
+        # in the combined boundary, so the feed and stub form a single
+        # closed contour with no shared internal edge (which was creating
+        # a degenerate face that broke port picking after Boolean Add).
+        #
+        # Each "segment" is either a Line (4-tuple of expressions
+        # x1, y1, x2, y2) or the marker "ARC" (handled specially below).
+        arc_L_x = "x_cross + stub_r*cos((90 + stub_ang/2)*pi/180)"
+        arc_L_y = "stub_r*sin((90 + stub_ang/2)*pi/180)"
+        arc_R_x = "x_cross + stub_r*cos((90 - stub_ang/2)*pi/180)"
+        arc_R_y = "stub_r*sin((90 - stub_ang/2)*pi/180)"
+
+        if feed_side == "left":
+            segments = [
+                # (kind, x1, y1, x2, y2)
+                ("Line", "x_sma",                   "y_run + W_feed/2",
+                         "x_cross - W_feed/2",      "y_run + W_feed/2"),       # top edge
+                ("Line", "x_cross - W_feed/2",      "y_run + W_feed/2",
+                         "x_cross - feed_w_slot/2", "0"),                       # taper L
+                ("Line", "x_cross - feed_w_slot/2", "0",
+                         arc_L_x,                   arc_L_y),                   # stub side L
+                ("Arc",  arc_L_x, arc_L_y, arc_R_x, arc_R_y),                   # arc CW over top
+                ("Line", arc_R_x,                   arc_R_y,
+                         "x_cross + feed_w_slot/2", "0"),                       # stub side R
+                ("Line", "x_cross + feed_w_slot/2", "0",
+                         "x_cross + W_feed/2",      "y_run + W_feed/2"),        # taper R
+                ("Line", "x_cross + W_feed/2",      "y_run + W_feed/2",
+                         "x_cross + W_feed/2",      "y_run - W_feed/2 + miter_d"),# vert down
+                ("Line", "x_cross + W_feed/2",      "y_run - W_feed/2 + miter_d",
+                         "x_cross + W_feed/2 - miter_d", "y_run - W_feed/2"),   # miter
+                ("Line", "x_cross + W_feed/2 - miter_d", "y_run - W_feed/2",
+                         "x_sma",                   "y_run - W_feed/2"),        # bottom edge
+                ("Line", "x_sma",                   "y_run - W_feed/2",
+                         "x_sma",                   "y_run + W_feed/2"),        # SMA left
+            ]
+        else:
+            # bottom-feed: tapered trapezoid with stub at slot crossing
+            segments = [
+                ("Line", "x_cross - W_feed/2",      "y_run",
+                         "x_cross - feed_w_slot/2", "0"),
+                ("Line", "x_cross - feed_w_slot/2", "0",
+                         arc_L_x,                   arc_L_y),
+                ("Arc",  arc_L_x, arc_L_y, arc_R_x, arc_R_y),
+                ("Line", arc_R_x,                   arc_R_y,
+                         "x_cross + feed_w_slot/2", "0"),
+                ("Line", "x_cross + feed_w_slot/2", "0",
+                         "x_cross + W_feed/2",      "y_run"),
+                ("Line", "x_cross + W_feed/2",      "y_run",
+                         "x_cross - W_feed/2",      "y_run"),
+            ]
+
+        out.append("' " + "=" * 60)
+        out.append("' 1. Combined feed + stub closed polygon (single curve)")
+        out.append("' " + "=" * 60)
+        out.append("")
+
+        for i, seg in enumerate(segments):
+            kind = seg[0]
+            if kind == "Line":
+                _, x1, y1, x2, y2 = seg
+                out.append("With Line")
+                out.append("     .Reset")
+                out.append(f'     .Name "fs_s{i+1}"')
+                out.append('     .Curve "vivaldi_bottom_outline"')
+                out.append(f'     .X1 "{x1}"')
+                out.append(f'     .Y1 "{y1}"')
+                out.append(f'     .X2 "{x2}"')
+                out.append(f'     .Y2 "{y2}"')
+                out.append("     .Create")
+                out.append("End With")
+                out.append("")
+            else:  # Arc
+                _, x1, y1, x2, y2 = seg
+                out.append("With Arc")
+                out.append("     .Reset")
+                out.append(f'     .Name "fs_s{i+1}"')
+                out.append('     .Curve "vivaldi_bottom_outline"')
+                out.append('     .Orientation "Clockwise"')
+                out.append('     .XCenter "x_cross"')
+                out.append('     .YCenter "0"')
+                out.append(f'     .X1 "{x1}"')
+                out.append(f'     .Y1 "{y1}"')
+                out.append('     .Angle "stub_ang"')
+                out.append('     .UseAngle "True"')
+                out.append('     .Segments "0"')
+                out.append("     .Create")
+                out.append("End With")
+                out.append("")
+
+        out.append("' Extrude the closed loop into a thin copper solid")
+        out.append("' Keep DeleteProfile False so the source curve survives —")
+        out.append("' some CST tools (port extension calc, in particular) need")
+        out.append("' the original curve in the navigation tree for downstream ops.")
+        out.append("With ExtrudeCurve")
+        out.append("     .Reset")
+        out.append('     .Name "vivaldi_feed"')
+        out.append('     .Component "component1"')
+        out.append('     .Material "PEC"')
+        out.append("     .Thickness -tCuVal")
+        out.append('     .Twistangle "0.0"')
+        out.append('     .Taperangle "0.0"')
+        out.append('     .DeleteProfile "False"')
+        out.append('     .Curve "vivaldi_bottom_outline:fs_s1"')
+        out.append("     .Create")
+        out.append("End With")
+        out.append("")
+        out.append("' Translate so the copper TOP face sits at Z_FEED_TOP")
+        out.append("With Transform")
+        out.append("     .Reset")
+        out.append('     .Name "component1:vivaldi_feed"')
+        out.append('     .Vector "0", "0", translateZ')
+        out.append('     .UsePickedPoints "False"')
+        out.append('     .InvertPickedPoints "False"')
+        out.append('     .MultipleObjects "False"')
+        out.append('     .GroupObjects "False"')
+        out.append('     .Repetitions "1"')
+        out.append('     .MultipleSelection "False"')
+        out.append("     .Transform \"Shape\", \"Translate\"")
+        out.append("End With")
+        out.append("")
+        out.append("' Create Port 1 from free coordinates at the feed launch.")
+        out.append("' This avoids CST history entries that depend on a picked")
+        out.append("' solid face ID; those face IDs can change when the feed")
+        out.append("' rebuilds during port-extension or parameter sweeps.")
+        out.append("On Error Resume Next")
+        out.append('Port.Delete "1"')
+        out.append("On Error Goto 0")
+        out.append("With Port")
+        out.append("     .Reset")
+        out.append('     .PortNumber "1"')
+        out.append('     .Label "vivaldi_feed"')
+        out.append('     .Folder ""')
+        out.append('     .NumberOfModes "1"')
+        out.append('     .AdjustPolarization "False"')
+        out.append('     .PolarizationAngle "0.0"')
+        out.append('     .ReferencePlaneDistance "0"')
+        out.append('     .TextSize "50"')
+        out.append('     .TextMaxLimit "0"')
+        out.append('     .Coordinates "Free"')
+        if feed_side == "left":
+            out.append('     .Orientation "xmin"')
+            out.append('     .Xrange "x_sma", "x_sma"')
+            out.append('     .Yrange "y_run - W_feed/2", "y_run + W_feed/2"')
+        else:
+            out.append('     .Orientation "ymin"')
+            out.append('     .Xrange "x_cross - W_feed/2", "x_cross + W_feed/2"')
+            out.append('     .Yrange "y_run", "y_run"')
+        out.append("     .Zrange portZMin, portZMax")
+        out.append('     .XrangeAdd "0.0", "0.0"')
+        out.append('     .YrangeAdd "0.0", "0.0"')
+        out.append('     .ZrangeAdd "0.0", "0.0"')
+        out.append('     .SingleEnded "False"')
+        out.append('     .WaveguideMonitor "False"')
+        out.append("     .Create")
+        out.append("End With")
+        out.append("")
+        out.append("End Sub")
+        out.append("")
+        out.append("' --- helper: create parameter only if it doesn't exist yet ---")
+        out.append("Sub EnsureParam(pname As String, pdefault As Double)")
+        out.append("    On Error Resume Next")
+        out.append("    Dim v As Double")
+        out.append("    v = RestoreDoubleParameter(pname)")
+        out.append("    If Err.Number <> 0 Then")
+        out.append("        Err.Clear")
+        out.append("        StoreDoubleParameter pname, pdefault")
+        out.append("    End If")
+        out.append("    On Error Goto 0")
+        out.append("End Sub")
+        return "\n".join(out) + "\n"
+
+    def _build_cst_full_model_macro(self, feed_side: str,
+                                    defaults: dict | None = None) -> str:
+        """Build the complete Vivaldi CST model as parameterized history.
+
+        This is the preferred CST path for tuning: the board, copper, slot,
+        bottom feed/stub, and port are all created from Parameter List names
+        rather than imported as static DXF/STEP geometry.
+        """
+        defaults = defaults or {}
+
+        def put_param(lines, name):
+            if name in defaults:
+                lines.append(f'    StoreDoubleParameter "{name}", {defaults[name]:.12g}')
+
+        def brick(lines, name, material, xr, yr, zr):
+            lines += [
+                "With Brick",
+                "     .Reset",
+                f'     .Name "{name}"',
+                '     .Component "Vivaldi"',
+                f'     .Material "{material}"',
+                f'     .Xrange "{xr[0]}", "{xr[1]}"',
+                f'     .Yrange "{yr[0]}", "{yr[1]}"',
+                f'     .Zrange "{zr[0]}", "{zr[1]}"',
+                "     .Create",
+                "End With",
+                "",
+            ]
+
+        unit = "mil" if defaults.get("_unit") == "mils" else "mm"
+        # Build a parameterized polygon for the whole slot+cavity opening:
+        # upper taper -> aperture edge -> lower taper -> back cavity arc.
+        # CST's Polygon object rejects function-heavy point expressions in
+        # some versions, so keep point coordinates to arithmetic on Parameter
+        # List variables plus numeric shape coefficients generated here.
+        n_taper = 34
+        n_cavity = 40
+        slot_points = []
+        w0_default = float(defaults.get("w0", 1.0))
+        W_ap_default = float(defaults.get("W_ap", max(w0_default * 2, 2.0)))
+        cav_rad_default = float(defaults.get("cav_rad", max(w0_default, 1.0)))
+        taper_denom = max(W_ap_default / 2 - w0_default / 2, 1e-12)
+        for i in range(n_taper):
+            q = i / (n_taper - 1)
+            x = f"({q:.12g})*L - center_x"
+            y_default = (w0_default / 2) * np.exp(
+                np.log(W_ap_default / w0_default) * q)
+            y_shape = (y_default - w0_default / 2) / taper_denom
+            y = f"(w0/2) + ({y_shape:.12g})*(W_ap/2 - w0/2)"
+            slot_points.append((x, y))
+        for i in range(n_taper - 1, -1, -1):
+            q = i / (n_taper - 1)
+            x = f"({q:.12g})*L - center_x"
+            y_default = (w0_default / 2) * np.exp(
+                np.log(W_ap_default / w0_default) * q)
+            y_shape = (y_default - w0_default / 2) / taper_denom
+            y = f"-((w0/2) + ({y_shape:.12g})*(W_ap/2 - w0/2))"
+            slot_points.append((x, y))
+        a0_default = np.arcsin(min(max(w0_default / (2 * cav_rad_default),
+                                      -0.999999), 0.999999))
+        cav_cx_norm = -np.sqrt(
+            max(cav_rad_default ** 2 - (w0_default / 2) ** 2, 0.0)
+        ) / cav_rad_default
+        for i in range(n_cavity):
+            q = i / (n_cavity - 1)
+            if i == 0:
+                x = "-center_x"
+                y = "-w0/2"
+            elif i == n_cavity - 1:
+                x = "-center_x"
+                y = "w0/2"
+            else:
+                t = -a0_default - q * (2 * np.pi - 2 * a0_default)
+                x = f"({cav_cx_norm + np.cos(t):.12g})*cav_rad - center_x"
+                y = f"({np.sin(t):.12g})*cav_rad"
+            slot_points.append((x, y))
+        upper_slot = slot_points[:n_taper]
+        lower_slot = slot_points[n_taper:2 * n_taper]
+        cavity_slot = slot_points[2 * n_taper:]
+        top_copper_points = [
+            ("board_L/2", "W_ap/2"),
+            ("board_L/2", "board_W/2"),
+            ("-board_L/2", "board_W/2"),
+            ("-board_L/2", "-board_W/2"),
+            ("board_L/2", "-board_W/2"),
+            ("board_L/2", "-W_ap/2"),
+        ]
+        top_copper_points.extend(lower_slot[1:])
+        top_copper_points.extend(cavity_slot[1:])
+        top_copper_points.extend(upper_slot[1:])
+
+        arc_L_x = "x_cross + stub_r*cos((90 + stub_ang/2)*pi/180)"
+        arc_L_y = "stub_r*sin((90 + stub_ang/2)*pi/180)"
+        arc_R_x = "x_cross + stub_r*cos((90 - stub_ang/2)*pi/180)"
+        arc_R_y = "stub_r*sin((90 - stub_ang/2)*pi/180)"
+        stub_ang_default = float(defaults.get("stub_ang", 90.0))
+        stub_arc = []
+        for q in (i / 23 for i in range(24)):
+            theta = np.deg2rad(90 + stub_ang_default / 2 - q * stub_ang_default)
+            stub_arc.append((
+                f"x_cross + ({np.cos(theta):.12g})*stub_r",
+                f"({np.sin(theta):.12g})*stub_r",
+            ))
+        if feed_side == "left":
+            feed_points = [
+                ("x_sma", "y_run + W_feed/2"),
+                ("x_cross - W_feed/2", "y_run + W_feed/2"),
+                ("x_cross - feed_w_slot/2", "0"),
+                *stub_arc,
+                ("x_cross + feed_w_slot/2", "0"),
+                ("x_cross + W_feed/2", "y_run + W_feed/2"),
+                ("x_cross + W_feed/2", "y_run - W_feed/2 + miter_d"),
+                ("x_cross + W_feed/2 - miter_d", "y_run - W_feed/2"),
+                ("x_sma", "y_run - W_feed/2"),
+            ]
+        else:
+            feed_points = [
+                ("x_cross - W_feed/2", "y_run"),
+                ("x_cross - feed_w_slot/2", "0"),
+                *stub_arc,
+                ("x_cross + feed_w_slot/2", "0"),
+                ("x_cross + W_feed/2", "y_run"),
+            ]
+
+        out = [
+            "' Full tunable CST model: Vivaldi Exponential TSA",
+            "' Generated by Antenna Designer",
+            "' Edit Parameter List values in CST, then Rebuild to retune.",
+            "",
+            "Sub Main ()",
+            "    With Units",
+            f'        .Geometry "{unit}"',
+            '        .Frequency "GHz"',
+            '        .Time "ns"',
+            '        .TemperatureUnit "Kelvin"',
+            "    End With",
+            "",
+            "    ' Parameter List values",
+        ]
+        for name in (
+            "fr_GHz", "f_low_GHz", "f_high_GHz", "er", "tan_d",
+            "L", "W_ap", "w0", "cav_rad", "h", "t_cu", "W_feed",
+            "feed_w_slot", "miter_d", "stub_r", "stub_ang", "m_back",
+            "m_side", "board_L", "board_W", "center_x", "x_cross",
+            "y_run", "x_sma", "port_margin", "port_k",
+        ):
+            put_param(out, name)
+        out += [
+            "",
+            '    Solver.FrequencyRange "f_low_GHz", "f_high_GHz"',
+            "",
+            "With Material",
+            "     .Reset",
+            '     .Name "Antenna_Substrate"',
+            '     .Type "Normal"',
+            '     .Epsilon "er"',
+            '     .Mue "1.0"',
+            '     .TanD "tan_d"',
+            "     .Create",
+            "End With",
+            "",
+        ]
+        brick(out, "Substrate", "Antenna_Substrate",
+              ("-board_L/2", "board_L/2"),
+              ("-board_W/2", "board_W/2"),
+              ("-h", "0"))
+
+        out += [
+            "' Top copper is generated as the final copper outline.",
+            "' This avoids fragile curve-solid Boolean subtraction in CST.",
+            "With Polygon",
+            "     .Reset",
+            '     .Name "Top_Copper_Profile"',
+            '     .Curve "vivaldi_top_outline"',
+        ]
+        x0, y0 = top_copper_points[0]
+        out.append(f'     .Point "{x0}", "{y0}"')
+        for x, y in top_copper_points[1:]:
+            out.append(f'     .LineTo "{x}", "{y}"')
+        out.append(f'     .LineTo "{x0}", "{y0}"')
+        out += [
+            "     .Create",
+            "End With",
+            "",
+            "With CoverCurve",
+            "     .Reset",
+            '     .Name "Top_Copper_Face"',
+            '     .Component "Vivaldi"',
+            '     .Material "PEC"',
+            '     .Curve "vivaldi_top_outline:Top_Copper_Profile"',
+            '     .DeleteCurve "False"',
+            "     .Create",
+            "End With",
+            "With ExtrudeCurve",
+            "     .Reset",
+            '     .Name "Top_Copper"',
+            '     .Component "Vivaldi"',
+            '     .Material "PEC"',
+            '     .Thickness "t_cu"',
+            '     .Twistangle "0.0"',
+            '     .Taperangle "0.0"',
+            '     .DeleteProfile "False"',
+            '     .Curve "vivaldi_top_outline:Top_Copper_Profile"',
+            "     .Create",
+            "End With",
+            "",
+            "' Bottom feed and radial stub as one closed curve",
+            "With Polygon",
+            "     .Reset",
+            '     .Name "Bottom_Feed_Profile"',
+            '     .Curve "vivaldi_bottom_outline"',
+        ]
+        x0, y0 = feed_points[0]
+        out.append(f'     .Point "{x0}", "{y0}"')
+        for x, y in feed_points[1:]:
+            out.append(f'     .LineTo "{x}", "{y}"')
+        out.append(f'     .LineTo "{x0}", "{y0}"')
+        out += [
+            "     .Create",
+            "End With",
+            "With ExtrudeCurve",
+            "     .Reset",
+            '     .Name "Bottom_Feed"',
+            '     .Component "Vivaldi"',
+            '     .Material "PEC"',
+            '     .Thickness "t_cu"',
+            '     .Twistangle "0.0"',
+            '     .Taperangle "0.0"',
+            '     .DeleteProfile "True"',
+            '     .Curve "vivaldi_bottom_outline:Bottom_Feed_Profile"',
+            "     .Create",
+            "End With",
+            "With Transform",
+            "     .Reset",
+            '     .Name "Vivaldi:Bottom_Feed"',
+            '     .Vector "0", "0", "-h - t_cu"',
+            '     .UsePickedPoints "False"',
+            '     .Repetitions "1"',
+            '     .MultipleObjects "False"',
+            '     .Transform "Shape", "Translate"',
+            "End With",
+            "",
+            "On Error Resume Next",
+            'Port.Delete "1"',
+            "On Error Goto 0",
+            "' Leave the real feed edge picked for CST's built-in",
+            "' Solver > Ports > Calculate Port Extension Coefficient macro.",
+            "' That calculator should construct the waveguide port because",
+            "' the extension coefficient depends on W_feed, h, er, and fmax.",
+            'Pick.PickFaceFromId "Vivaldi:Bottom_Feed", "7"',
+        ]
+        if defaults.get("port_k") is not None:
+            out += [
+                "' Port constructed using CST's bundled microstrip extension",
+                "' tables (same 1% error tables used by the solver macro).",
+                "With Port",
+                "     .Reset",
+                '     .PortNumber "1"',
+                '     .Label "vivaldi_feed"',
+                '     .NumberOfModes "1"',
+                '     .AdjustPolarization False',
+                '     .PolarizationAngle "0.0"',
+                '     .ReferencePlaneDistance "0"',
+                '     .TextSize "50"',
+                '     .Coordinates "Picks"',
+                '     .Orientation "Positive"',
+                '     .PortOnBound "True"',
+                '     .ClipPickedPortToBound "False"',
+            ]
+            if feed_side == "left":
+                out += [
+                    '     .XrangeAdd "0", "0"',
+                    '     .YrangeAdd "h*port_k", "h*port_k"',
+                    '     .ZrangeAdd "h*port_k", "h"',
+                ]
+            else:
+                out += [
+                    '     .XrangeAdd "h*port_k", "h*port_k"',
+                    '     .YrangeAdd "0", "0"',
+                    '     .ZrangeAdd "h*port_k", "h"',
+                ]
+            out += [
+                '     .Shield "PEC"',
+                '     .SingleEnded "False"',
+                "     .Create",
+                "End With",
+            ]
+        out += [
+            "",
+            "End Sub",
+            "",
+        ]
+        return "\n".join(out)
 
     def _summary_extra(self, ctx, r):
         m, u = ctx.out_mult, ctx.unit_str
@@ -752,29 +1767,37 @@ class Vivaldi(AntennaBase):
         y_run = -y_half * 0.55            # where the horizontal run sits
         sma_r = min(wf * 2.0, ms * 0.6)
 
-        # Radial stub sector (same on both layouts) — opens upward from crossing
+        # Radial stub sector (same on both layouts) — opens upward from
+        # crossing. Apex is a finite W_v-wide segment matching the
+        # microstrip top edge so the stub shares an actual edge with the
+        # feed (no point-contact). W_v isn't in display units yet so
+        # pull from results in metres and convert.
+        Wv_disp = r.get("feed_w_slot", 0.0) * m
+        if Wv_disp <= 0:
+            Wv_disp = wf       # fall back to W_feed if not tapered
         theta_c = np.pi / 2
         ang_s = np.linspace(theta_c - stub_half, theta_c + stub_half, 60)
-        stub_pts = [(feed_x, 0.0)]
+        stub_pts  = [(feed_x + Wv_disp / 2, 0.0)]
         stub_pts += [(feed_x + stub_len * np.cos(a), stub_len * np.sin(a))
                      for a in ang_s]
-        stub_pts.append((feed_x, 0.0))
+        stub_pts.append((feed_x - Wv_disp / 2, 0.0))
 
+        # Filled L-shaped microstrip polygon (with taper + miter). The
+        # vertex list was computed by compute() in metres — pull it out and
+        # convert to display units here.
+        feed_pts_disp = [(px * m, py * m) for px, py in r.get("feed_poly", [])]
+        if feed_pts_disp:
+            ax.add_patch(mpatches.Polygon(
+                feed_pts_disp, closed=True,
+                facecolor="#1de9ff66", edgecolor="#1de9ff", lw=1.2,
+                ls="--", zorder=4))
         if feed_side == "left":
-            # Horizontal run from left edge to feed_x, then 90° up to cross slot
-            ax.plot([x_left, feed_x], [y_run, y_run], ls="--",
-                    lw=max(wf, 0.6), color="#1de9ff", alpha=0.85, zorder=4)
-            ax.plot([feed_x, feed_x], [y_run, 0.0], ls="--",
-                    lw=max(wf, 0.6), color="#1de9ff", alpha=0.85, zorder=4)
-            # SMA footprint at left edge
             ax.add_patch(mpatches.Circle((x_left, y_run), sma_r,
                                          fill=False, ls=":", ec="#1de9ff",
                                          lw=1.0, zorder=4))
             ax.text(x_left, y_run - sma_r*1.4, "SMA", color="#1de9ff",
                     ha="center", va="top", fontsize=8, zorder=5)
         else:  # "bottom"
-            ax.plot([feed_x, feed_x], [y_bot, 0.0], ls="--",
-                    lw=max(wf, 0.6), color="#1de9ff", alpha=0.85, zorder=4)
             ax.add_patch(mpatches.Circle((feed_x, y_bot), sma_r,
                                          fill=False, ls=":", ec="#1de9ff",
                                          lw=1.0, zorder=4))

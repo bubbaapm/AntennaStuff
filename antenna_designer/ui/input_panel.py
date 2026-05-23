@@ -76,12 +76,23 @@ class InputPanel(QScrollArea):
             "Display unit for all lengths. Switching does NOT convert the "
             "numbers already typed in — re-enter values if you change unit.")
 
-        # Substrate combo + εr/h (auto-populated when substrate changes)
+        # Substrate combo + εr/h (auto-populated when substrate changes).
+        # Combo lives in a row with the "Manage…" button so the user can
+        # add / edit / delete user substrates without leaving the panel.
+        sub_row = QHBoxLayout(); sub_row.setContentsMargins(0, 0, 0, 0)
         self.cb_sub = QComboBox()
-        self.cb_sub.addItem("— Custom —")
-        for name in SUBSTRATES.keys():
-            self.cb_sub.addItem(name)
+        self._populate_substrate_combo()
         self.cb_sub.currentTextChanged.connect(self._on_substrate)
+        self.btn_sub_manage = QPushButton("Manage…")
+        self.btn_sub_manage.setMaximumWidth(80)
+        self.btn_sub_manage.setToolTip(
+            "Add / edit / delete user-defined substrates. Stored in "
+            "~/.antenna_designer/substrates.json — built-in materials "
+            "are read-only.")
+        self.btn_sub_manage.clicked.connect(self._open_substrate_editor)
+        sub_row.addWidget(self.cb_sub, 1)
+        sub_row.addWidget(self.btn_sub_manage)
+        self._sub_row_widget = QWidget(); self._sub_row_widget.setLayout(sub_row)
         # Standard panel thickness picker — populates from the chosen substrate.
         self.cb_h_preset = QComboBox()
         self.cb_h_preset.addItem("— pick h —")
@@ -94,7 +105,7 @@ class InputPanel(QScrollArea):
 
         self.base_form.addRow("Resonant freq (GHz):", self.fr)
         self.base_form.addRow("Target Z₀ (Ω):", self.z0)
-        self.base_form.addRow("Substrate preset:", self.cb_sub)
+        self.base_form.addRow("Substrate preset:", self._sub_row_widget)
         self.base_form.addRow("Standard h (mm):", self.cb_h_preset)
         self.base_form.addRow("εr:", self.er)
         self.base_form.addRow("h — substrate (units):", self.h)
@@ -169,6 +180,32 @@ class InputPanel(QScrollArea):
             lbl.setStyleSheet("color: #a0a0a0; font-size: 11px; padding: 4px;")
             self.extra_form.addRow(lbl)
         self.antenna_changed.emit(name)
+
+    def _populate_substrate_combo(self, select: str | None = None):
+        """Refill the substrate combo from the (built-in + user) merged dict.
+
+        Keeps the current selection if it still exists; otherwise falls
+        back to '— Custom —'.
+        """
+        prev = select or self.cb_sub.currentText() if hasattr(self, "cb_sub") else None
+        self.cb_sub.blockSignals(True)
+        self.cb_sub.clear()
+        self.cb_sub.addItem("— Custom —")
+        for name in SUBSTRATES.keys():
+            self.cb_sub.addItem(name)
+        if prev and self.cb_sub.findText(prev) >= 0:
+            self.cb_sub.setCurrentText(prev)
+        self.cb_sub.blockSignals(False)
+
+    def _open_substrate_editor(self):
+        from .substrate_dialog import SubstrateEditorDialog
+        from calculators.physics import reload_user_substrates
+        dlg = SubstrateEditorDialog(self, current_name=self.cb_sub.currentText())
+        dlg.exec()
+        # Always refresh — the dialog persists on close even if the user
+        # didn't click Save explicitly.
+        reload_user_substrates()
+        self._populate_substrate_combo()
 
     def _on_substrate(self, name):
         # Refresh the standard-thickness picker for the chosen substrate

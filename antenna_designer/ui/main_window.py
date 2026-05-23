@@ -155,7 +155,24 @@ class MainWindow(QMainWindow):
         a_exp = QAction("Export current plot (PNG)…", self)
         a_exp.triggered.connect(self._export_current_plot)
         file_m.addAction(a_exp)
-        export_m = file_m.addMenu("Export geometry curves")
+        export_m = file_m.addMenu("Export CST / geometry")
+        a_cst_full = QAction("CST full tunable model (.bas)…", self)
+        a_cst_full.setToolTip(
+            "Build the whole antenna in CST from Parameter List variables "
+            "and history commands. This is the preferred path for tuning: "
+            "edit W, L, feed offsets, substrate thickness, etc. in CST and "
+            "Rebuild. Run from CST's macro editor; do not import the .bas "
+            "into the History List as a nested RunScript.")
+        a_cst_full.triggered.connect(self._export_cst_full_model)
+        export_m.addAction(a_cst_full)
+        a_cst_ps = QAction("CST direct builder PowerShell (.ps1)…", self)
+        a_cst_ps.setToolTip(
+            "Launch CST through COM and add the generated model directly to "
+            "the History List with AddToHistory. Use this for external "
+            "automation; it avoids CST's unsupported nested RunScript path.")
+        a_cst_ps.triggered.connect(self._export_cst_powershell_builder)
+        export_m.addAction(a_cst_ps)
+        export_m.addSeparator()
         a_dxf_all = QAction("DXF — single combined .dxf (recommended)…", self)
         a_dxf_all.setToolTip("One .dxf file containing every curve as a "
                              "separate POLYLINE on its own layer, plus the "
@@ -174,6 +191,15 @@ class MainWindow(QMainWindow):
                             "paste into CST → Curves → Create Analytical Curve.")
         a_cst_an.triggered.connect(self._export_geometry_cst_analytical)
         export_m.addAction(a_cst_an)
+        a_cst_vba = QAction("CST VBA macro — feed + port (.bas)…", self)
+        a_cst_vba.setToolTip(
+            "Parametric assembly script for the bottom-layer feed + radial "
+            "stub, plus a free-coordinate waveguide port at the feed launch. "
+            "Paste into CST's History List (or save and run via Macros → Run "
+            "Macro). All dimensions reference the CST Parameter List so you "
+            "can sweep them after import.")
+        a_cst_vba.triggered.connect(self._export_geometry_cst_vba)
+        export_m.addAction(a_cst_vba)
         a_spline = QAction("CST spline points — one .txt per curve…", self)
         a_spline.setToolTip("Pick a folder. Each curve is saved as its own "
                             "ASCII-pure 'x y z' TXT — no headers, no unicode, "
@@ -484,6 +510,127 @@ class MainWindow(QMainWindow):
                 f"Wrote CST analytical-curve text to: {fn}")
         except Exception as e:
             QMessageBox.critical(self, "Export error", f"{type(e).__name__}: {e}")
+
+    def _export_geometry_cst_vba(self):
+        if not self._have_results():
+            return
+        macro = self._last_antenna.export_cst_vba_macro(
+            self._last_ctx, self._last_results)
+        if not macro.strip():
+            QMessageBox.information(
+                self, "No VBA macro",
+                "This antenna does not currently emit a CST VBA macro.\n\n"
+                "Only antennas with non-trivial bottom-layer geometry "
+                "(e.g. Vivaldi) provide one. For everything else, the "
+                "DXF + analytical-curve exports are enough.")
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}_cst.bas"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export CST VBA macro", default,
+            "VBA macro (*.bas);;Text (*.txt)")
+        if not fn:
+            return
+        try:
+            # Non-ASCII chars only appear in comments; UTF-8 is fine for CST.
+            Path(fn).write_text(macro, encoding="utf-8")
+            self.statusBar().showMessage(f"Wrote CST VBA macro to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error",
+                                 f"{type(e).__name__}: {e}")
+
+    def _export_cst_full_model(self):
+        if not self._have_results():
+            return
+        macro = self._last_antenna.export_cst_full_model_macro(
+            self._last_ctx, self._last_results)
+        if not macro.strip():
+            QMessageBox.information(
+                self, "No full CST model builder",
+                "This antenna does not yet provide a full tunable CST model "
+                "builder.\n\nUse this exporter when available for CST tuning. "
+                "DXF, spline, and analytical-curve exports are still useful "
+                "for inspection or manual assembly, but they are not the same "
+                "as a parameter-list-driven CST history model.")
+            return
+        default = f"{self._last_antenna_name.replace(' ', '_')}_full_cst_model.bas"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export full tunable CST model", default,
+            "VBA macro (*.bas);;Text (*.txt)")
+        if not fn:
+            return
+        try:
+            Path(fn).write_text(self._annotate_cst_macro(macro), encoding="utf-8")
+            self.statusBar().showMessage(
+                f"Wrote full tunable CST model macro to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error",
+                                 f"{type(e).__name__}: {e}")
+
+    def _macro_body_for_add_to_history(self, macro: str) -> str:
+        """Return the Sub Main body so COM can call AddToHistory directly."""
+        lines = macro.splitlines()
+        start = 0
+        end = len(lines)
+        for i, line in enumerate(lines):
+            if line.strip().lower().startswith("sub main"):
+                start = i + 1
+                break
+        for i in range(start, len(lines)):
+            if lines[i].strip().lower() == "end sub":
+                end = i
+                break
+        return "\n".join(lines[start:end]).strip() + "\n"
+
+    def _annotate_cst_macro(self, macro: str) -> str:
+        note = (
+            "' IMPORTANT:\n"
+            "'   Run this from CST: Macros > Edit/Run VBA Macro.\n"
+            "'   Do NOT use File > Import BAS-file into History List, and do\n"
+            "'   NOT call it through RunScript from another macro. CST rejects\n"
+            "'   nested RunScript calls that try to update the History List.\n"
+            "'   For external automation, export the PowerShell builder instead.\n"
+            "'\n"
+        )
+        return note + macro
+
+    def _export_cst_powershell_builder(self):
+        if not self._have_results():
+            return
+        macro = self._last_antenna.export_cst_full_model_macro(
+            self._last_ctx, self._last_results)
+        if not macro.strip():
+            QMessageBox.information(
+                self, "No full CST model builder",
+                "This antenna does not yet provide a full tunable CST model "
+                "builder.")
+            return
+        body = self._macro_body_for_add_to_history(macro)
+        name = self._last_antenna_name.replace("'", "").replace("\n", " ")
+        ps = (
+            "# Generated by Antenna Designer\n"
+            "# Launches CST and creates a parameter-list-driven model using\n"
+            "# AddToHistory. This avoids CST's unsupported nested RunScript path.\n"
+            "$cst = New-Object -ComObject CSTStudio.application\n"
+            "$mws = $cst.NewMWS()\n"
+            "$history = @'\n"
+            f"{body}"
+            "'@\n"
+            f"$mws.AddToHistory('Build tunable model - {name}', $history)\n"
+            "$mws.Rebuild()\n"
+            "Write-Host 'CST tunable model created.'\n"
+        )
+        default = f"{self._last_antenna_name.replace(' ', '_')}_cst_builder.ps1"
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Export CST PowerShell builder", default,
+            "PowerShell (*.ps1);;Text (*.txt)")
+        if not fn:
+            return
+        try:
+            Path(fn).write_text(ps, encoding="utf-8")
+            self.statusBar().showMessage(f"Wrote CST PowerShell builder to: {fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export error",
+                                 f"{type(e).__name__}: {e}")
 
     def _export_geometry_spline_txt(self):
         if not self._have_results():
