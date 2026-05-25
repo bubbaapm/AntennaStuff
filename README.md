@@ -139,3 +139,18 @@ vna_gui/
 | F5    | Apply sweep settings to device |
 | F6    | Single sweep |
 | F8    | Open calibration wizard |
+
+### Characterization tools
+
+Long-running reliability / accuracy tests live in `vna_gui/tools/`.
+
+```bash
+cd vna_gui
+python tools/characterization_gui.py
+```
+
+The characterization window configures repeated drift / repeatability runs,
+stores one summary CSV plus raw Touchstone files, and can generate analysis
+plots from the completed run. The same workflow is also available from the
+command line via `python -m vna_tester.tools.characterize` and
+`python -m vna_tester.tools.analyze_characterization`.

@@ -135,6 +135,15 @@ class ConnectionPanel(QGroupBox):
         row_status.addWidget(self.lbl_status, 1)
         v.addLayout(row_status)
 
+        row_temp = QHBoxLayout()
+        row_temp.addWidget(QLabel("Temp:"))
+        self.lbl_temp = QLabel("--")
+        self.lbl_temp.setStyleSheet("color:#888;")
+        self.lbl_temp.setWordWrap(False)
+        self.lbl_temp.setToolTip("LibreVNA internal temperature readings from DEV:INF:TEMP?.")
+        row_temp.addWidget(self.lbl_temp, 1)
+        v.addLayout(row_temp)
+
         # Device row — compact
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Dev:"))
@@ -212,3 +221,26 @@ class ConnectionPanel(QGroupBox):
 
     def set_librevna_path(self, p: str) -> None:
         self.le_path.setText(p)
+
+    def set_temperatures(self, raw: str, flags: dict | None = None) -> None:
+        flags = flags or {}
+        parts = [p.strip() for p in raw.replace(",", "/").split("/") if p.strip()]
+        if parts:
+            text = " / ".join(parts) + " C"
+        else:
+            text = "--"
+        warnings = []
+        if flags.get("pll_unlocked"):
+            warnings.append("PLL unlock")
+        if flags.get("adc_overload"):
+            warnings.append("ADC overload")
+        if flags.get("source_unleveled"):
+            warnings.append("source unleveled")
+        if warnings:
+            self.lbl_temp.setStyleSheet("color:#ffd34d;")
+            self.lbl_temp.setToolTip("Temperature readings; warning: " + ", ".join(warnings))
+            text += "  !"
+        else:
+            self.lbl_temp.setStyleSheet("color:#b8d7ff;" if parts else "color:#888;")
+            self.lbl_temp.setToolTip("LibreVNA internal temperature readings from DEV:INF:TEMP?.")
+        self.lbl_temp.setText(text)

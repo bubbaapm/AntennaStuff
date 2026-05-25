@@ -75,6 +75,9 @@ class MainWindow(QMainWindow):
         self._sweep_thread: Optional[QThread] = None
         self._csv_log_file: Optional[object] = None
         self._csv_log_writer: Optional[csv.writer] = None
+        self._device_status_timer = QTimer(self)
+        self._device_status_timer.setInterval(5000)
+        self._device_status_timer.timeout.connect(self._refresh_device_status)
 
         self._build_ui()
         self._build_menu()
@@ -301,6 +304,9 @@ class MainWindow(QMainWindow):
 
         if not self.controller.connect_to_server():
             return
+        cur = self.controller.connected_serial()
+        if not cur or cur.lower() == "not connected":
+            self.controller.connect_device("")
         # Make sure live traces exist on the device
         self.controller.ensure_default_traces()
         self._refresh_device_list()
@@ -319,9 +325,20 @@ class MainWindow(QMainWindow):
         if ok:
             idn = self.controller.idn() or "(connected)"
             self.conn.set_connected(True, idn[:60])
+            self._device_status_timer.start()
+            self._refresh_device_status()
         else:
             self.conn.set_connected(False)
+            self.conn.set_temperatures("", {})
+            self._device_status_timer.stop()
         self.statusBar().showMessage("Connected." if ok else "Disconnected.", 4000)
+
+    def _refresh_device_status(self) -> None:
+        if not self.controller.connected:
+            return
+        temps = self.controller.device_temperatures()
+        flags = self.controller.device_status_flags()
+        self.conn.set_temperatures(temps, flags)
 
     def _refresh_device_list(self) -> None:
         if not self.controller.connected:

@@ -112,6 +112,27 @@ class VnaController(QObject):
         except ScpiError:
             return ""
 
+    def device_status_flags(self) -> dict:
+        """Return hardware status flags that can explain suspect measurements."""
+        commands = {
+            "pll_unlocked": ":DEVICE:STATUS:UNLOCKED?",
+            "adc_overload": ":DEVICE:STATUS:ADCOVERLOAD?",
+            "source_unleveled": ":DEVICE:STATUS:UNLEVEL?",
+        }
+        out = {}
+        for key, cmd in commands.items():
+            try:
+                out[key] = self.client.query_bool(cmd)
+            except ScpiError:
+                out[key] = False
+        return out
+
+    def device_temperatures(self) -> str:
+        try:
+            return self.client.query(":DEVICE:INFO:TEMPERATURES?").strip()
+        except ScpiError:
+            return ""
+
     def connect_device(self, serial: str = "") -> bool:
         try:
             cmd = ":DEV:CONN" + (f" {serial}" if serial else "")
@@ -139,6 +160,7 @@ class VnaController(QObject):
         c = self.client
         try:
             c.write(":VNA:ACQ:STOP")
+            c.write(":VNA:SWEEP FREQUENCY")
             c.write(f":VNA:FREQ:START {cfg.start_hz:.6f}")
             c.write(f":VNA:FREQ:STOP {cfg.stop_hz:.6f}")
             c.write(f":VNA:ACQ:POINTS {int(cfg.points)}")
