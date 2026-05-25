@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -21,12 +22,14 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 
 from ..controller import SweepConfig, _parse_trace_data
+from ..launcher import LibreVnaLauncher, is_port_open
 from ..metrics import antenna_metrics
 from ..scpi import ScpiClient, ScpiError
 from ..trace import Trace, VNA_PARAMS
 
 
 TOUCHSTONE_2P_ORDER = ("S11", "S21", "S12", "S22")
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _utc_now() -> datetime:
@@ -51,6 +54,98 @@ def _format_float(value: float) -> str:
     if value is None or not math.isfinite(float(value)):
         return ""
     return f"{float(value):.12g}"
+
+
+def _find_files_limited(root: Path, name: str, max_depth: int = 4) -> List[Path]:
+    if not root.exists():
+        return []
+    root = root.resolve()
+    found: List[Path] = []
+    stack = [(root, 0)]
+    while stack:
+        cur, depth = stack.pop()
+        try:
+            for child in cur.iterdir():
+                if child.is_file() and child.name == name:
+                    found.append(child)
+                elif child.is_dir() and depth < max_depth and not child.name.startswith("."):
+                    stack.append((child, depth + 1))
+        except OSError:
+            continue
+    return found
+
+
+def auto_find_librevna_gui(explicit: Path | None = None) -> Path | None:
+    if explicit is not None:
+        return explicit
+    env_value = os.environ.get("LIBREVNA_GUI") or os.environ.get("LIBREVNA_GUI_PATH")
+    if env_value:
+        candidate = Path(env_value).expanduser()
+        if candidate.exists():
+            return candidate
+
+    candidates = [
+        Path.cwd() / "LibreVNA-GUI",
+        Path.cwd() / "LibreVNA-GUI.exe",
+        PACKAGE_ROOT / ".." / "LibreVNA" / "release" / "LibreVNA-GUI.exe",
+        Path.home() / "librevna" / "LibreVNA-GUI",
+        Path.home() / "LibreVNA-GUI",
+    ]
+    for candidate in candidates:
+        candidate = candidate.expanduser().resolve()
+        if candidate.exists():
+            return candidate
+
+    search_roots = [
+        Path.home() / "librevna",
+        Path.home() / "LibreVNA",
+        Path.home() / "Downloads",
+    ]
+    found: List[Path] = []
+    for root in search_roots:
+        found.extend(_find_files_limited(root.expanduser(), "LibreVNA-GUI", max_depth=4))
+    return sorted(found, key=lambda p: len(str(p)))[0] if found else None
+
+
+def find_calibration(value: str) -> Path | None:
+    if not value:
+        return None
+    if value.lower() in ("latest", "auto"):
+        search_roots = [
+            Path.cwd() / "cals",
+            Path.cwd() / "Cals",
+            PACKAGE_ROOT / "cals",
+            PACKAGE_ROOT / "Cals",
+            Path.home() / "librevna",
+            Path.home() / "LibreVNA",
+        ]
+        files: List[Path] = []
+        for root in search_roots:
+            if root.exists():
+                try:
+                    files.extend(root.rglob("*.cal"))
+                except OSError:
+                    pass
+        return max(files, key=lambda p: p.stat().st_mtime) if files else None
+    return Path(value).expanduser()
+
+
+def load_calibration(client: ScpiClient, path: Path) -> None:
+    ok = client.query_bool(f':VNA:CAL:LOAD? "{path}"')
+    if not ok:
+        raise RuntimeError(f"LibreVNA-GUI rejected calibration file: {path}")
+    time.sleep(0.35)
+
+
+def read_device_sweep_config(client: ScpiClient) -> SweepConfig:
+    return SweepConfig(
+        start_hz=client.query_float(":VNA:FREQ:START?"),
+        stop_hz=client.query_float(":VNA:FREQ:STOP?"),
+        points=client.query_int(":VNA:ACQ:POINTS?"),
+        ifbw_hz=client.query_float(":VNA:ACQ:IFBW?"),
+        averaging=client.query_int(":VNA:ACQ:AVG?"),
+        power_dbm=client.query_float(":VNA:STIM:LVL?"),
+    )
 
 
 def configure_device(client: ScpiClient, cfg: SweepConfig, traces: Sequence[str]) -> None:
@@ -368,6 +463,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default="localhost", help="SCPI host. Default: localhost")
     parser.add_argument("--port", type=int, default=19542, help="SCPI port. Default: 19542")
+    parser.add_argument("--librevna-gui", type=Path, default=None, help="Optional path to LibreVNA-GUI. If omitted, common Pi/Linux/Windows locations are searched")
+    parser.add_argument("--show-librevna-gui", action="store_true", help="Start LibreVNA-GUI with its visible window instead of --no-gui")
+    parser.add_argument("--keep-librevna-gui", action="store_true", help="Leave LibreVNA-GUI running after the characterization run if this script started it")
     parser.add_argument("--dut", required=True, help="DUT name for metadata and CSV rows")
     parser.add_argument(
         "--kind",
@@ -376,10 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="DUT/test kind. Default: antenna",
     )
     parser.add_argument("--notes", default="", help="Operator notes saved to metadata.json")
-    parser.add_argument("--calibration", default="", help="Calibration file/path noted in metadata")
+    parser.add_argument("--calibration", default="", help="Calibration .cal to load before the run, or 'latest' to load the newest .cal found in common cals folders")
+    parser.add_argument("--use-cal-sweep", action="store_true", help="After loading calibration, use the sweep settings stored in the calibration/active VNA instead of CLI sweep values")
     parser.add_argument("--out", type=Path, required=True, help="Output run directory")
-    parser.add_argument("--start", dest="start_hz", type=float, required=True, help="Sweep start in Hz")
-    parser.add_argument("--stop", dest="stop_hz", type=float, required=True, help="Sweep stop in Hz")
+    parser.add_argument("--start", dest="start_hz", type=float, default=None, help="Sweep start in Hz. Optional when --use-cal-sweep is set")
+    parser.add_argument("--stop", dest="stop_hz", type=float, default=None, help="Sweep stop in Hz. Optional when --use-cal-sweep is set")
     parser.add_argument("--points", type=int, default=1001, help="Sweep points. Default: 1001")
     parser.add_argument("--ifbw", dest="ifbw_hz", type=positive_float, default=1000.0, help="IFBW in Hz")
     parser.add_argument("--averaging", type=int, default=4, help="Averaging count. Default: 4")
@@ -399,13 +498,14 @@ def write_metadata(
     cfg: SweepConfig,
     device_id: str,
     device_status: Dict[str, str],
+    calibration_file: str,
 ) -> None:
     metadata = {
         "created_utc": _utc_now().isoformat().replace("+00:00", "Z"),
         "dut_name": args.dut,
         "dut_kind": args.kind,
         "notes": args.notes,
-        "calibration_file": args.calibration,
+        "calibration_file": calibration_file,
         "device_id": device_id,
         "device_status_at_start": device_status,
         "scpi": {"host": args.host, "port": args.port},
@@ -429,7 +529,9 @@ def planned_indices(args: argparse.Namespace) -> Iterable[int]:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.stop_hz <= args.start_hz:
+    if (args.start_hz is None or args.stop_hz is None) and not args.use_cal_sweep:
+        raise SystemExit("--start and --stop are required unless --use-cal-sweep is set")
+    if args.start_hz is not None and args.stop_hz is not None and args.stop_hz <= args.start_hz:
         raise SystemExit("--stop must be greater than --start")
     if args.points < 2:
         raise SystemExit("--points must be at least 2")
@@ -439,18 +541,27 @@ def run(args: argparse.Namespace) -> int:
         args.count = 1
 
     args.out.mkdir(parents=True, exist_ok=True)
-    cfg = SweepConfig(
-        start_hz=args.start_hz,
-        stop_hz=args.stop_hz,
-        points=args.points,
-        ifbw_hz=args.ifbw_hz,
-        averaging=args.averaging,
-        power_dbm=args.power_dbm,
-    )
+    cfg = SweepConfig()
     csv_path = args.out / "summary.csv"
     device_id = ""
     started_at = time.monotonic()
     baseline_f_res: float | None = None
+    launcher: LibreVnaLauncher | None = None
+
+    if not is_port_open(args.host, args.port):
+        gui_path = auto_find_librevna_gui(args.librevna_gui)
+        if gui_path is None:
+            raise SystemExit(
+                "SCPI server is not reachable and LibreVNA-GUI was not found. "
+                "Unzip LibreVNA-GUI under ~/librevna, set LIBREVNA_GUI, or pass "
+                "--librevna-gui /path/to/LibreVNA-GUI."
+            )
+        print(f"Starting LibreVNA-GUI: {gui_path}")
+        launcher = LibreVnaLauncher(gui_path, host=args.host, port=args.port)
+        ok = launcher.ensure_running(wait_seconds=15.0, headless=not args.show_librevna_gui)
+        if not ok:
+            launcher.stop()
+            raise SystemExit(f"could not start or reach LibreVNA-GUI at {gui_path}")
 
     client = ScpiClient(args.host, args.port, timeout=10.0)
     try:
@@ -459,9 +570,35 @@ def run(args: argparse.Namespace) -> int:
             device_id = client.query("*IDN?").strip()
         except ScpiError:
             device_id = ""
+        calibration_file = ""
+        cal_path = find_calibration(args.calibration)
+        if args.calibration and cal_path is None:
+            raise SystemExit(f"no calibration file found for {args.calibration!r}")
+        if cal_path is not None:
+            if not cal_path.exists():
+                raise SystemExit(f"calibration file does not exist: {cal_path}")
+            print(f"Loading calibration: {cal_path}")
+            load_calibration(client, cal_path)
+            calibration_file = str(cal_path)
+            args.calibration = calibration_file
+        if args.use_cal_sweep:
+            cfg = read_device_sweep_config(client)
+            cfg.ifbw_hz = args.ifbw_hz
+            cfg.averaging = args.averaging
+            cfg.power_dbm = args.power_dbm
+        else:
+            assert args.start_hz is not None and args.stop_hz is not None
+            cfg = SweepConfig(
+                start_hz=args.start_hz,
+                stop_hz=args.stop_hz,
+                points=args.points,
+                ifbw_hz=args.ifbw_hz,
+                averaging=args.averaging,
+                power_dbm=args.power_dbm,
+            )
         configure_device(client, cfg, args.traces)
         initial_status = read_device_status(client)
-        write_metadata(args.out / "metadata.json", args, cfg, device_id, initial_status)
+        write_metadata(args.out / "metadata.json", args, cfg, device_id, initial_status, calibration_file)
 
         with csv_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
@@ -504,6 +641,8 @@ def run(args: argparse.Namespace) -> int:
         except Exception:
             pass
         client.close()
+        if launcher is not None and not args.keep_librevna_gui:
+            launcher.stop()
 
     print(f"Wrote {csv_path}")
     return 0

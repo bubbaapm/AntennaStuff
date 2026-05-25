@@ -58,13 +58,17 @@ wget https://github.com/jankae/LibreVNA/releases/download/v1.6.5/LibreVNA-GUI-RP
 unzip LibreVNA-GUI-RPi5-v1.6.5.zip
 ```
 
-Find the unpacked GUI folder:
+You do not need to remember the final path during normal use. The
+characterization logger searches common locations such as `~/librevna` and can
+start LibreVNA-GUI automatically.
+
+For a one-time manual test, find the unpacked GUI folder:
 
 ```bash
 find ~/librevna -maxdepth 3 -type f -name LibreVNA-GUI -print
 ```
 
-Start the GUI from the folder containing `LibreVNA-GUI`:
+Start the GUI once from the folder containing `LibreVNA-GUI`:
 
 ```bash
 cd /path/from/find/command
@@ -73,7 +77,8 @@ chmod +x ./LibreVNA-GUI
 ```
 
 Confirm that LibreVNA-GUI sees the USB device and that its SCPI server is
-enabled on port `19542`.
+enabled on port `19542`. After this first manual test, close LibreVNA-GUI; the
+logger can start it automatically.
 
 ## Install The Characterization Tools
 
@@ -97,7 +102,7 @@ dependencies. The PyQt GUI tool is optional on the Pi.
 
 ## First Smoke Test
 
-Keep LibreVNA-GUI running, then in another terminal:
+The logger will start LibreVNA-GUI if the SCPI server is not already running:
 
 ```bash
 cd ~/AntennaStuff/vna_gui
@@ -156,11 +161,56 @@ tmux attach -t vna
 - Use wired Ethernet if possible.
 - Confirm the Pi clock is correct.
 - Do a 3-sweep smoke test before leaving.
-- Leave LibreVNA-GUI running before starting the logger.
+- Leave LibreVNA-GUI in `~/librevna` so the logger can find and start it
+  automatically. If you put it elsewhere, pass `--librevna-gui /path/to/LibreVNA-GUI`.
 - Do not leave the normal custom VNA GUI connected at the same time. LibreVNA's
   SCPI server accepts only one connection.
 - Make sure the sweep grid matches the calibration grid when possible.
 - Record the calibration file/path in the characterization tool notes.
+
+## Calibration Workflow
+
+LibreVNA calibration state is held by LibreVNA-GUI, not permanently by the
+hardware. If the VNA/Pi loses power, load a `.cal` file before the overnight
+run.
+
+Recommended workflow:
+
+1. Calibrate on the Windows PC or Pi.
+2. Save the calibration as a `.cal` file.
+3. Copy the `.cal` file to:
+
+```text
+~/AntennaStuff/vna_gui/cals/
+```
+
+4. Run the characterization with:
+
+```bash
+--calibration latest --use-cal-sweep
+```
+
+`latest` loads the newest `.cal` file found in common calibration folders.
+`--use-cal-sweep` uses the sweep grid stored in the loaded calibration/active
+VNA state, so you do not have to retype start/stop/points.
+
+Example overnight antenna run using the newest copied calibration:
+
+```bash
+tmux new -s vna
+cd ~/AntennaStuff/vna_gui
+source .venv/bin/activate
+python -m vna_tester.tools.characterize \
+  --calibration latest \
+  --use-cal-sweep \
+  --dut "Overnight antenna" \
+  --kind antenna \
+  --ifbw 1000 \
+  --averaging 4 \
+  --interval 300 \
+  --count 96 \
+  --out characterization_runs/overnight_antenna
+```
 
 Useful Pi setup checks:
 

@@ -149,8 +149,23 @@ class CharacterizationWindow(QMainWindow):
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(19542)
+        self.librevna_gui = QLineEdit()
+        self.librevna_gui.setPlaceholderText("Optional path to LibreVNA-GUI")
+        self.librevna_gui.setToolTip("If set, the runner starts LibreVNA-GUI when SCPI is not already reachable.")
+        gui_row = QHBoxLayout()
+        gui_browse = QPushButton("Browse...")
+        gui_browse.clicked.connect(self._browse_librevna_gui)
+        gui_row.addWidget(self.librevna_gui, 1)
+        gui_row.addWidget(gui_browse)
+        self.show_librevna_gui = QCheckBox("Show window")
+        self.show_librevna_gui.setToolTip("Off starts LibreVNA-GUI with --no-gui. On leaves the window visible.")
+        self.keep_librevna_gui = QCheckBox("Keep running after test")
+        self.keep_librevna_gui.setToolTip("Leave LibreVNA-GUI running when this tool started it.")
         form.addRow("SCPI host:", self.host)
         form.addRow("SCPI port:", self.port)
+        form.addRow("LibreVNA-GUI:", gui_row)
+        form.addRow("", self.show_librevna_gui)
+        form.addRow("", self.keep_librevna_gui)
         return box
 
     def _dut_box(self) -> QGroupBox:
@@ -162,6 +177,7 @@ class CharacterizationWindow(QMainWindow):
         self.kind.setCurrentText("load")
         self.notes = QLineEdit()
         self.calibration = QLineEdit()
+        self.calibration.setPlaceholderText("Optional .cal path, or latest")
         cal_row = QHBoxLayout()
         cal_browse = QPushButton("Browse...")
         cal_browse.clicked.connect(self._browse_calibration)
@@ -171,6 +187,9 @@ class CharacterizationWindow(QMainWindow):
         form.addRow("Kind:", self.kind)
         form.addRow("Notes:", self.notes)
         form.addRow("Cal file:", cal_row)
+        self.use_cal_sweep = QCheckBox("Use cal sweep")
+        self.use_cal_sweep.setToolTip("After loading calibration, use the active/calibration sweep grid instead of the Start/Stop/Points fields.")
+        form.addRow("", self.use_cal_sweep)
         return box
 
     def _sweep_box(self) -> QGroupBox:
@@ -295,10 +314,14 @@ class CharacterizationWindow(QMainWindow):
         return [
             self.host,
             self.port,
+            self.librevna_gui,
+            self.show_librevna_gui,
+            self.keep_librevna_gui,
             self.dut,
             self.kind,
             self.notes,
             self.calibration,
+            self.use_cal_sweep,
             self.start_hz,
             self.stop_hz,
             self.points,
@@ -327,6 +350,16 @@ class CharacterizationWindow(QMainWindow):
         if path:
             self.calibration.setText(path)
 
+    def _browse_librevna_gui(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose LibreVNA-GUI executable",
+            str(Path.home()),
+            "LibreVNA-GUI (LibreVNA-GUI LibreVNA-GUI.exe);;All files (*)",
+        )
+        if path:
+            self.librevna_gui.setText(path)
+
     def _browse_analysis_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose run folder", self.analysis_run_dir.text() or str(APP_ROOT))
         if path:
@@ -348,6 +381,16 @@ class CharacterizationWindow(QMainWindow):
             self.host.text().strip() or "localhost",
             "--port",
             str(self.port.value()),
+        ]
+        if self.librevna_gui.text().strip():
+            args.extend(["--librevna-gui", self.librevna_gui.text().strip()])
+        if self.show_librevna_gui.isChecked():
+            args.append("--show-librevna-gui")
+        if self.keep_librevna_gui.isChecked():
+            args.append("--keep-librevna-gui")
+        if self.use_cal_sweep.isChecked():
+            args.append("--use-cal-sweep")
+        args.extend([
             "--dut",
             self.dut.text().strip() or "DUT",
             "--kind",
@@ -374,7 +417,7 @@ class CharacterizationWindow(QMainWindow):
             str(self.timeout_s.value()),
             "--target-db",
             self.target_db.text().strip(),
-        ]
+        ])
         if self.count.value() > 0:
             args.extend(["--count", str(self.count.value())])
         else:

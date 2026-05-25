@@ -100,6 +100,24 @@ def _candidate_paths() -> list[Path]:
                     cands.append(Path(root) / sub / name)
                     cands.append(Path(root) / sub / "release" / name)
 
+    # 3) Common Linux / Raspberry Pi locations. Keep this bounded so startup
+    # never wanders through the whole home directory.
+    home = Path.home()
+    linux_roots = [
+        home / "librevna",
+        home / "LibreVNA",
+        home / "Downloads",
+        Path("/opt/librevna"),
+        Path("/opt/LibreVNA"),
+    ]
+    for root in linux_roots:
+        for name in _LIBREVNA_EXE_NAMES:
+            cands.append(root / name)
+            cands.append(root / "release" / name)
+        for sub in ("*", "*/*", "*/*/*"):
+            for name in _LIBREVNA_EXE_NAMES:
+                cands.append(root / sub / name)
+
     return cands
 
 

@@ -27,6 +27,20 @@ Dry run with a 50 ohm load:
 python -m vna_tester.tools.characterize --dut "50 ohm load dry run" --kind load --start 2.3e9 --stop 2.6e9 --points 1001 --ifbw 1000 --averaging 4 --interval 30 --count 10 --out characterization_runs\load_dry_run
 ```
 
+If LibreVNA-GUI is not already running, the logger searches common locations
+such as `~/librevna` and starts it automatically. If you put the executable
+somewhere unusual, add:
+
+```powershell
+--librevna-gui C:\path\to\LibreVNA-GUI.exe
+```
+
+To load the newest copied calibration and use its sweep grid:
+
+```powershell
+--calibration latest --use-cal-sweep
+```
+
 Overnight antenna drift example:
 
 ```powershell
