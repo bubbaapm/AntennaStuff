@@ -17,6 +17,8 @@ output, and can run the analyzer after the measurement finishes.
 Use `Read From VNA` after loading or creating a calibration in the normal GUI
 if you want the characterization run to use the exact active sweep grid.
 
+For Raspberry Pi overnight setup notes, see `PI_SETUP.md`.
+
 ## Run From The Command Line
 
 Dry run with a 50 ohm load:
