@@ -33,6 +33,13 @@ For a prompted terminal workflow instead of remembering all CLI flags:
 python tools/characterization_prompt.py
 ```
 
+At the end of the prompted run, choose whether to generate analysis plots
+immediately. To analyze an existing run later:
+
+```bash
+python tools/analyze_run.py
+```
+
 ## Run From The Command Line
 
 Dry run with a 50 ohm load:
@@ -71,6 +78,12 @@ Analyze a run:
 
 ```powershell
 python -m vna_tester.tools.analyze_characterization characterization_runs\patch_overnight
+```
+
+Or use the prompted wrapper:
+
+```powershell
+python tools\analyze_run.py
 ```
 
 ## Output Files

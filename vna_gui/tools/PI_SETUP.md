@@ -49,6 +49,13 @@ source .venv/bin/activate
 python tools/characterization_prompt.py
 ```
 
+The prompt asks whether to run analysis automatically after acquisition. To
+analyze an older run later:
+
+```bash
+python tools/analyze_run.py
+```
+
 The remaining sections show the same process manually and include extra
 troubleshooting notes.
 

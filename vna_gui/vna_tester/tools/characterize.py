@@ -27,6 +27,7 @@ from ..launcher import LibreVnaLauncher, is_port_open
 from ..metrics import antenna_metrics
 from ..scpi import ScpiClient, ScpiError
 from ..trace import Trace, VNA_PARAMS
+from . import analyze_characterization
 
 
 TOUCHSTONE_2P_ORDER = ("S11", "S21", "S12", "S22")
@@ -633,6 +634,10 @@ def apply_interactive_prompts(args: argparse.Namespace) -> argparse.Namespace:
     args.out = Path(_prompt_text("Output run folder", str(args.out or default_out)))
     args.show_librevna_gui = _prompt_bool("Show LibreVNA-GUI window", args.show_librevna_gui)
     args.keep_librevna_gui = _prompt_bool("Keep LibreVNA-GUI running after test", args.keep_librevna_gui)
+    args.analyze_after = _prompt_bool("Run analysis when acquisition finishes", args.analyze_after)
+    if args.analyze_after:
+        args.analysis_include_extra = _prompt_bool("Include extra low-level analysis plots", args.analysis_include_extra)
+        args.analysis_include_histograms = _prompt_bool("Include histogram/distribution plots", args.analysis_include_histograms)
     return args
 
 
@@ -669,6 +674,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", type=nonnegative_float, default=0.0, help="Total run duration in seconds")
     parser.add_argument("--timeout", type=positive_float, default=120.0, help="Per-sweep timeout in seconds")
     parser.add_argument("--target-db", type=float, default=-10.0, help="Return-loss bandwidth threshold")
+    parser.add_argument("--analyze-after", action="store_true", help="Run the analyzer after acquisition finishes successfully")
+    parser.add_argument("--analysis-include-extra", action="store_true", help="When analyzing after acquisition, include lower-level trace summary plots")
+    parser.add_argument("--analysis-include-histograms", action="store_true", help="When analyzing after acquisition, include histogram/distribution plots")
     return parser
 
 
@@ -829,6 +837,14 @@ def run(args: argparse.Namespace) -> int:
             launcher.stop()
 
     print(f"Wrote {csv_path}")
+    if args.analyze_after:
+        analysis_args = argparse.Namespace(
+            run_dir=args.out,
+            out=None,
+            include_extra=args.analysis_include_extra,
+            include_histograms=args.analysis_include_histograms,
+        )
+        analyze_characterization.run(analysis_args)
     return 0
 
 
