@@ -27,6 +27,23 @@ after setup.
 - LibreVNA connected directly or through a reliable powered USB hub.
 - Optional: small monitor/keyboard for first setup; VNC is fine afterward.
 
+## Quick Setup
+
+From the repo root on the Pi, run:
+
+```bash
+bash vna_gui/tools/setup_pi.sh
+```
+
+The script performs the dependency install, installs the LibreVNA udev rule,
+downloads the official Raspberry Pi 5 LibreVNA-GUI release into
+`vna_gui/tools/librevna`, deletes the ZIP after extraction, makes
+`LibreVNA-GUI` executable, creates `vna_gui/.venv`, and installs the Python
+requirements.
+
+The remaining sections show the same process manually and include extra
+troubleshooting notes.
+
 ## Install OS And Dependencies
 
 Use a 64-bit Raspberry Pi OS Desktop or Ubuntu Desktop image.
@@ -58,9 +75,10 @@ wget https://github.com/jankae/LibreVNA/releases/download/v1.6.5/LibreVNA-GUI-RP
 unzip LibreVNA-GUI-RPi5-v1.6.5.zip
 ```
 
-You do not need to remember the final path during normal use. The
-characterization logger searches common locations such as `~/librevna` and can
-start LibreVNA-GUI automatically.
+You do not need to remember the final path during normal use. The setup script
+uses `vna_gui/tools/librevna`; the characterization logger searches that folder
+plus common locations such as `~/librevna` and can start LibreVNA-GUI
+automatically.
 
 For a one-time manual test, find the unpacked GUI folder:
 
@@ -161,8 +179,9 @@ tmux attach -t vna
 - Use wired Ethernet if possible.
 - Confirm the Pi clock is correct.
 - Do a 3-sweep smoke test before leaving.
-- Leave LibreVNA-GUI in `~/librevna` so the logger can find and start it
-  automatically. If you put it elsewhere, pass `--librevna-gui /path/to/LibreVNA-GUI`.
+- Leave LibreVNA-GUI in `vna_gui/tools/librevna` or `~/librevna` so the logger
+  can find and start it automatically. If you put it elsewhere, pass
+  `--librevna-gui /path/to/LibreVNA-GUI`.
 - Do not leave the normal custom VNA GUI connected at the same time. LibreVNA's
   SCPI server accepts only one connection.
 - Make sure the sweep grid matches the calibration grid when possible.

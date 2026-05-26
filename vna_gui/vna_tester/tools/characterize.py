@@ -87,6 +87,7 @@ def auto_find_librevna_gui(explicit: Path | None = None) -> Path | None:
     candidates = [
         Path.cwd() / "LibreVNA-GUI",
         Path.cwd() / "LibreVNA-GUI.exe",
+        PACKAGE_ROOT / "tools" / "librevna" / "LibreVNA-GUI",
         PACKAGE_ROOT / ".." / "LibreVNA" / "release" / "LibreVNA-GUI.exe",
         Path.home() / "librevna" / "LibreVNA-GUI",
         Path.home() / "LibreVNA-GUI",
@@ -97,6 +98,7 @@ def auto_find_librevna_gui(explicit: Path | None = None) -> Path | None:
             return candidate
 
     search_roots = [
+        PACKAGE_ROOT / "tools" / "librevna",
         Path.home() / "librevna",
         Path.home() / "LibreVNA",
         Path.home() / "Downloads",

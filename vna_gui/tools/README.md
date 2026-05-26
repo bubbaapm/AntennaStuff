@@ -17,7 +17,15 @@ output, and can run the analyzer after the measurement finishes.
 Use `Read From VNA` after loading or creating a calibration in the normal GUI
 if you want the characterization run to use the exact active sweep grid.
 
-For Raspberry Pi overnight setup notes, see `PI_SETUP.md`.
+For Raspberry Pi overnight setup, run:
+
+```bash
+bash tools/setup_pi.sh
+```
+
+That script installs the Pi packages, LibreVNA udev rule, LibreVNA-GUI Raspberry
+Pi release under `tools/librevna`, and the Python virtual environment. For the
+manual equivalent and troubleshooting notes, see `PI_SETUP.md`.
 
 ## Run From The Command Line
 
@@ -28,8 +36,8 @@ python -m vna_tester.tools.characterize --dut "50 ohm load dry run" --kind load 
 ```
 
 If LibreVNA-GUI is not already running, the logger searches common locations
-such as `~/librevna` and starts it automatically. If you put the executable
-somewhere unusual, add:
+such as `tools/librevna` and `~/librevna`, then starts it automatically. If you
+put the executable somewhere unusual, add:
 
 ```powershell
 --librevna-gui C:\path\to\LibreVNA-GUI.exe

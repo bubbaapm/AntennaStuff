@@ -84,7 +84,14 @@ def _candidate_paths() -> list[Path]:
     # 1) Sibling LibreVNA folder, multiple ancestor levels
     walk = here
     for _ in range(5):
-        for sub in ("LibreVNA/release", "LibreVNA", "librevna/release", "librevna"):
+        for sub in (
+            "tools/librevna",
+            "tools/librevna/release",
+            "LibreVNA/release",
+            "LibreVNA",
+            "librevna/release",
+            "librevna",
+        ):
             for name in _LIBREVNA_EXE_NAMES:
                 cands.append(walk / sub / name)
         if walk.parent == walk:
