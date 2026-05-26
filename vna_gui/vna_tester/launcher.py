@@ -75,6 +75,8 @@ class LibreVnaLauncher:
             "QT_SCALE_FACTOR", "QT_DEBUG_PLUGINS",
         ):
             env.pop(k, None)
+        if headless and sys.platform.startswith("linux") and not env.get("DISPLAY"):
+            env["QT_QPA_PLATFORM"] = "offscreen"
 
         try:
             self._proc = subprocess.Popen(
