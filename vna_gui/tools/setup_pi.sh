@@ -3,12 +3,12 @@ set -euo pipefail
 
 # Raspberry Pi desktop setup for LibreVNA characterization runs.
 #
-# Run from the repo root:
-#   bash vna_gui/tools/setup_pi.sh
+# Run from vna_gui:
+#   bash tools/setup_pi.sh
 #
 # Optional overrides:
-#   LIBREVNA_GUI_ZIP_URL=https://.../LibreVNA-GUI-RPi5-v1.6.5.zip bash vna_gui/tools/setup_pi.sh
-#   VENV_DIR=/path/to/.venv bash vna_gui/tools/setup_pi.sh
+#   LIBREVNA_GUI_ZIP_URL=https://.../LibreVNA-GUI-RPi5-v1.6.5.zip bash tools/setup_pi.sh
+#   VENV_DIR=/path/to/.venv bash tools/setup_pi.sh
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VNA_GUI_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -133,8 +133,10 @@ main() {
   install_python_env
 
   info "Done"
+  printf '[setup-pi] Next: cd %s\n' "${VNA_GUI_DIR}"
   printf '[setup-pi] Activate the environment with: source %s/bin/activate\n' "${VENV_DIR}"
-  printf '[setup-pi] Try a smoke test from vna_gui with: python -m vna_tester.tools.characterize --dut \"Pi smoke test\" --kind load --start 2.3e9 --stop 2.6e9 --points 501 --count 3 --out characterization_runs/pi_smoke_test\n'
+  printf '[setup-pi] Prompted CLI: python tools/characterization_prompt.py\n'
+  printf '[setup-pi] Direct smoke test: python -m vna_tester.tools.characterize --dut "Pi smoke test" --kind load --start 2.3e9 --stop 2.6e9 --points 501 --count 3\n'
   printf '[setup-pi] If LibreVNA USB access fails after the udev rule install, reboot the Pi.\n'
 }
 

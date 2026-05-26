@@ -13,6 +13,7 @@ import csv
 import json
 import math
 import os
+import subprocess
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -50,6 +51,11 @@ def _safe_name(value: str) -> str:
     return "".join(chars).strip("_") or "dut"
 
 
+def default_run_dir(dut_name: str, when: datetime | None = None) -> Path:
+    when = when or _utc_now()
+    return PACKAGE_ROOT / "characterization_runs" / f"{_safe_name(dut_name)}_{when.strftime('%Y%m%d_%H%M%S')}"
+
+
 def _format_float(value: float) -> str:
     if value is None or not math.isfinite(float(value)):
         return ""
@@ -73,6 +79,63 @@ def _find_files_limited(root: Path, name: str, max_depth: int = 4) -> List[Path]
         except OSError:
             continue
     return found
+
+
+def calibration_search_roots() -> List[Path]:
+    return [
+        Path.cwd() / "cals",
+        Path.cwd() / "Cals",
+        PACKAGE_ROOT / "cals",
+        PACKAGE_ROOT / "Cals",
+        Path.home() / "librevna",
+        Path.home() / "LibreVNA",
+    ]
+
+
+def list_calibrations() -> List[Path]:
+    files: List[Path] = []
+    seen: set[Path] = set()
+    for root in calibration_search_roots():
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("*.cal"):
+                resolved = path.resolve()
+                if resolved not in seen:
+                    files.append(path)
+                    seen.add(resolved)
+        except OSError:
+            pass
+    return sorted(files, key=calibration_sort_key, reverse=True)
+
+
+def _git_file_timestamp(path: Path) -> float | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(PACKAGE_ROOT), "log", "-1", "--format=%ct", "--", str(path.resolve())],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = proc.stdout.strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def calibration_sort_key(path: Path) -> Tuple[float, float, str]:
+    git_ts = _git_file_timestamp(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (git_ts or 0.0, mtime, path.name.lower())
 
 
 def auto_find_librevna_gui(explicit: Path | None = None) -> Path | None:
@@ -113,22 +176,8 @@ def find_calibration(value: str) -> Path | None:
     if not value:
         return None
     if value.lower() in ("latest", "auto"):
-        search_roots = [
-            Path.cwd() / "cals",
-            Path.cwd() / "Cals",
-            PACKAGE_ROOT / "cals",
-            PACKAGE_ROOT / "Cals",
-            Path.home() / "librevna",
-            Path.home() / "LibreVNA",
-        ]
-        files: List[Path] = []
-        for root in search_roots:
-            if root.exists():
-                try:
-                    files.extend(root.rglob("*.cal"))
-                except OSError:
-                    pass
-        return max(files, key=lambda p: p.stat().st_mtime) if files else None
+        files = list_calibrations()
+        return files[0] if files else None
     return Path(value).expanduser()
 
 
@@ -459,6 +508,134 @@ def nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _prompt_text(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value or default
+
+
+def _prompt_bool(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    while True:
+        value = input(f"{label} [{hint}]: ").strip().lower()
+        if not value:
+            return default
+        if value in ("y", "yes"):
+            return True
+        if value in ("n", "no"):
+            return False
+        print("Please enter y or n.")
+
+
+def _prompt_choice(label: str, choices: Sequence[str], default: str) -> str:
+    joined = "/".join(choices)
+    while True:
+        value = _prompt_text(f"{label} ({joined})", default).lower()
+        if value in choices:
+            return value
+        print(f"Please choose one of: {', '.join(choices)}")
+
+
+def _prompt_float(label: str, default: float) -> float:
+    while True:
+        value = _prompt_text(label, f"{default:g}")
+        try:
+            return float(value)
+        except ValueError:
+            print("Please enter a number.")
+
+
+def _prompt_int(label: str, default: int, minimum: int = 0) -> int:
+    while True:
+        value = _prompt_text(label, str(default))
+        try:
+            parsed = int(value)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+        if parsed >= minimum:
+            return parsed
+        print(f"Please enter at least {minimum}.")
+
+
+def apply_interactive_prompts(args: argparse.Namespace) -> argparse.Namespace:
+    print("LibreVNA characterization setup")
+    print("Press Enter to accept defaults.\n")
+
+    args.dut = _prompt_text("Test/DUT name", args.dut or "50 ohm load dry run")
+    args.kind = _prompt_choice(
+        "Kind",
+        ("antenna", "load", "open", "short", "thru", "cable", "other"),
+        args.kind or "antenna",
+    )
+    args.notes = _prompt_text("Notes", args.notes or "")
+
+    cals = list_calibrations()
+    if cals:
+        print("\nCalibration files:")
+        for i, path in enumerate(cals, start=1):
+            try:
+                shown = path.relative_to(PACKAGE_ROOT)
+            except ValueError:
+                shown = path
+            print(f"  {i}. {shown}")
+        print("  0. No calibration")
+        default_cal = "1"
+        while True:
+            choice = _prompt_text("Choose calibration number, path, latest, or 0", default_cal)
+            if choice == "0":
+                args.calibration = ""
+                break
+            if choice.lower() in ("latest", "auto"):
+                args.calibration = choice.lower()
+                break
+            if choice.isdigit() and 1 <= int(choice) <= len(cals):
+                args.calibration = str(cals[int(choice) - 1])
+                break
+            candidate = Path(choice).expanduser()
+            if candidate.exists():
+                args.calibration = str(candidate)
+                break
+            print("Choose a listed number, 'latest', 0, or an existing .cal path.")
+    else:
+        args.calibration = _prompt_text("Calibration path, latest, or blank", args.calibration or "")
+
+    args.use_cal_sweep = _prompt_bool("Use sweep grid from loaded calibration/active VNA", args.use_cal_sweep)
+    if not args.use_cal_sweep:
+        args.start_hz = _prompt_float("Start Hz", args.start_hz or 2.3e9)
+        args.stop_hz = _prompt_float("Stop Hz", args.stop_hz or 2.6e9)
+        args.points = _prompt_int("Points", args.points or 1001, minimum=2)
+    else:
+        print("Sweep start/stop/points will be read from LibreVNA after calibration loads.")
+
+    args.ifbw_hz = _prompt_float("IFBW Hz", args.ifbw_hz or 1000.0)
+    args.averaging = _prompt_int("Averaging", args.averaging or 4, minimum=1)
+    args.power_dbm = _prompt_float("Power dBm", args.power_dbm if args.power_dbm is not None else -10.0)
+
+    default_traces = "S11,S21,S12,S22" if args.kind in ("thru", "cable") else "S11"
+    while True:
+        try:
+            args.traces = parse_traces(_prompt_text("Traces", default_traces))
+            break
+        except argparse.ArgumentTypeError as exc:
+            print(exc)
+
+    args.interval = _prompt_float("Interval between sweep starts, seconds", args.interval or 300.0)
+    args.count = _prompt_int("Sweep count (0 to use duration)", args.count or 0, minimum=0)
+    if args.count <= 0:
+        args.duration = _prompt_float("Duration seconds", args.duration or 3600.0)
+    else:
+        args.duration = 0.0
+    args.timeout = _prompt_float("Per-sweep timeout seconds", args.timeout or 120.0)
+    args.target_db = _prompt_float("Return-loss bandwidth target dB", args.target_db or -10.0)
+
+    default_out = default_run_dir(args.dut)
+    args.out = Path(_prompt_text("Output run folder", str(args.out or default_out)))
+    args.show_librevna_gui = _prompt_bool("Show LibreVNA-GUI window", args.show_librevna_gui)
+    args.keep_librevna_gui = _prompt_bool("Keep LibreVNA-GUI running after test", args.keep_librevna_gui)
+    return args
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Log repeated LibreVNA sweeps for drift, repeatability, and control tests."
@@ -468,7 +645,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--librevna-gui", type=Path, default=None, help="Optional path to LibreVNA-GUI. If omitted, common Pi/Linux/Windows locations are searched")
     parser.add_argument("--show-librevna-gui", action="store_true", help="Start LibreVNA-GUI with its visible window instead of --no-gui")
     parser.add_argument("--keep-librevna-gui", action="store_true", help="Leave LibreVNA-GUI running after the characterization run if this script started it")
-    parser.add_argument("--dut", required=True, help="DUT name for metadata and CSV rows")
+    parser.add_argument("--interactive", action="store_true", help="Prompt for run settings instead of requiring all options up front")
+    parser.add_argument("--dut", default="", help="DUT name for metadata and CSV rows")
     parser.add_argument(
         "--kind",
         default="antenna",
@@ -478,7 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notes", default="", help="Operator notes saved to metadata.json")
     parser.add_argument("--calibration", default="", help="Calibration .cal to load before the run, or 'latest' to load the newest .cal found in common cals folders")
     parser.add_argument("--use-cal-sweep", action="store_true", help="After loading calibration, use the sweep settings stored in the calibration/active VNA instead of CLI sweep values")
-    parser.add_argument("--out", type=Path, required=True, help="Output run directory")
+    parser.add_argument("--out", type=Path, default=None, help="Output run directory")
     parser.add_argument("--start", dest="start_hz", type=float, default=None, help="Sweep start in Hz. Optional when --use-cal-sweep is set")
     parser.add_argument("--stop", dest="stop_hz", type=float, default=None, help="Sweep stop in Hz. Optional when --use-cal-sweep is set")
     parser.add_argument("--points", type=int, default=1001, help="Sweep points. Default: 1001")
@@ -531,6 +709,10 @@ def planned_indices(args: argparse.Namespace) -> Iterable[int]:
 
 
 def run(args: argparse.Namespace) -> int:
+    if not args.dut:
+        raise SystemExit("--dut is required unless --interactive is set")
+    if args.out is None:
+        args.out = default_run_dir(args.dut)
     if (args.start_hz is None or args.stop_hz is None) and not args.use_cal_sweep:
         raise SystemExit("--start and --stop are required unless --use-cal-sweep is set")
     if args.start_hz is not None and args.stop_hz is not None and args.stop_hz <= args.start_hz:
@@ -653,6 +835,8 @@ def run(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.interactive:
+        args = apply_interactive_prompts(args)
     return run(args)
 
 

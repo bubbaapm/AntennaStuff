@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import shlex
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -33,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..scpi import ScpiClient, ScpiError
+from .characterize import default_run_dir
 
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +46,8 @@ class CharacterizationWindow(QMainWindow):
         self._process: QProcess | None = None
         self._last_run_dir: Path | None = None
         self._mode = ""
+        self._auto_out_dir = True
+        self._last_auto_out_dir = ""
 
         self._build_ui()
         self._build_toolbar()
@@ -96,7 +98,7 @@ class CharacterizationWindow(QMainWindow):
         out_box = QGroupBox("Output")
         out_layout = QFormLayout(out_box)
         row = QHBoxLayout()
-        self.out_dir = QLineEdit(str(APP_ROOT / "characterization_runs" / self._default_run_name()))
+        self.out_dir = QLineEdit()
         browse = QPushButton("Browse...")
         browse.clicked.connect(self._browse_out_dir)
         row.addWidget(self.out_dir, 1)
@@ -139,6 +141,9 @@ class CharacterizationWindow(QMainWindow):
                 widget.currentTextChanged.connect(self._refresh_preview)
             elif isinstance(widget, QCheckBox):
                 widget.stateChanged.connect(self._refresh_preview)
+        self.dut.textChanged.connect(self._update_default_out_dir)
+        self.out_dir.textEdited.connect(self._mark_out_dir_manual)
+        self._update_default_out_dir()
         self._refresh_preview()
         return page
 
@@ -337,12 +342,21 @@ class CharacterizationWindow(QMainWindow):
             self.out_dir,
         ]
 
-    def _default_run_name(self) -> str:
-        return "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _mark_out_dir_manual(self) -> None:
+        if self.out_dir.text() != self._last_auto_out_dir:
+            self._auto_out_dir = False
+
+    def _update_default_out_dir(self) -> None:
+        if not self._auto_out_dir:
+            return
+        path = str(default_run_dir(self.dut.text().strip() or "DUT"))
+        self._last_auto_out_dir = path
+        self.out_dir.setText(path)
 
     def _browse_out_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose run folder", self.out_dir.text())
         if path:
+            self._auto_out_dir = False
             self.out_dir.setText(path)
 
     def _browse_calibration(self) -> None:

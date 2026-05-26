@@ -17,7 +17,7 @@ output, and can run the analyzer after the measurement finishes.
 Use `Read From VNA` after loading or creating a calibration in the normal GUI
 if you want the characterization run to use the exact active sweep grid.
 
-For Raspberry Pi overnight setup, run:
+For Raspberry Pi overnight setup, run this from `vna_gui`:
 
 ```bash
 bash tools/setup_pi.sh
@@ -26,6 +26,12 @@ bash tools/setup_pi.sh
 That script installs the Pi packages, LibreVNA udev rule, LibreVNA-GUI Raspberry
 Pi release under `tools/librevna`, and the Python virtual environment. For the
 manual equivalent and troubleshooting notes, see `PI_SETUP.md`.
+
+For a prompted terminal workflow instead of remembering all CLI flags:
+
+```bash
+python tools/characterization_prompt.py
+```
 
 ## Run From The Command Line
 

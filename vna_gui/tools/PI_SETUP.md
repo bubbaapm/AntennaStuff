@@ -29,10 +29,10 @@ after setup.
 
 ## Quick Setup
 
-From the repo root on the Pi, run:
+From `vna_gui` on the Pi, run:
 
 ```bash
-bash vna_gui/tools/setup_pi.sh
+bash tools/setup_pi.sh
 ```
 
 The script performs the dependency install, installs the LibreVNA udev rule,
@@ -40,6 +40,14 @@ downloads the official Raspberry Pi 5 LibreVNA-GUI release into
 `vna_gui/tools/librevna`, deletes the ZIP after extraction, makes
 `LibreVNA-GUI` executable, creates `vna_gui/.venv`, and installs the Python
 requirements.
+
+After setup, stay in `vna_gui` for the characterization commands. For a guided
+terminal workflow, run:
+
+```bash
+source .venv/bin/activate
+python tools/characterization_prompt.py
+```
 
 The remaining sections show the same process manually and include extra
 troubleshooting notes.
