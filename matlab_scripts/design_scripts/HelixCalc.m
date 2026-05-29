@@ -2,8 +2,8 @@ close all; clear; clc;
 
 % Constants and Inputs
 c = 2.99792458e8;       % speed of light in m/s
-N = 10;                 % number of turns in helix
-fr = 2.45e9;            % frequency in Hz
+N = 5;                 % number of turns in helix
+fr = 5.2e9;            % frequency in Hz
 lambda_0 = c/fr;
 
 % Helix Design Calculations
@@ -15,7 +15,7 @@ S = C * tan(alpha_r);   % space between turns
 L_0 = sqrt(C^2 + S^2);  % length of one turn
 L_n = N * L_0;          % length of helix wire
 L = S * N;              % axial length of helix
-d = 2;                  % wire diameter
+d = 2.54;                  % wire diameter
 
 % Unit Conversions (mm)
 C_mm = C*1e3;
