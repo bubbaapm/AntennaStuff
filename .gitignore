@@ -25,6 +25,8 @@ Thumbs.db
 .idea/
 
 vna_tester_config.json
+radar_gui/radar_gui_config.json
+radar_gui/data/
 
 !LibreVNAImages/**/*.png
 !vna_gui/Images/*.png
