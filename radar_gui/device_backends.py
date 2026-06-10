@@ -319,4 +319,7 @@ def make_backend(name: str) -> DeviceBackend:
     key = name.strip().lower()
     if "shell" in key or key == "nanovna":
         return NanoVnaShellBackend()
+    if "libre" in key or "scpi" in key:
+        from .librevna_backend import LibreVnaScpiBackend
+        return LibreVnaScpiBackend()
     return LiteVnaBackend()

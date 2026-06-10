@@ -64,7 +64,22 @@ class RadarView(QWidget):
         self._peak_distances: list[float] = []
         self._ascope_ymax = 1e-3
 
-    def update_radar(self, frame: RadarFrame) -> None:
+    def update_radar(self, frame: RadarFrame, active: bool = True) -> None:
+        # 1. Background data collection (always run to preserve history)
+        if frame.waterfall_row.size:
+            if self._waterfall_bin_count != int(frame.waterfall_row.size):
+                self._waterfall_rows = []
+                self._waterfall_bin_count = int(frame.waterfall_row.size)
+            self._waterfall_rows.append(frame.waterfall_row)
+            self._waterfall_rows = self._waterfall_rows[-250:]
+        if frame.peaks:
+            self._peak_distances.append(frame.peaks[0].distance_m)
+            self._peak_distances = self._peak_distances[-500:]
+
+        # 2. Rendering (only when active/visible tab)
+        if not active:
+            return
+
         self.ascope_curve.setData(frame.distance_m, frame.magnitude)
         self._update_ascope_scale(frame.magnitude)
         self.peak_scatter.setData(
@@ -72,20 +87,15 @@ class RadarView(QWidget):
             [p.amplitude for p in frame.peaks],
         )
         self._update_peak_table(frame)
-        if frame.waterfall_row.size:
-            if self._waterfall_bin_count != int(frame.waterfall_row.size):
-                self._waterfall_rows = []
-                self._waterfall_bin_count = int(frame.waterfall_row.size)
-            self._waterfall_rows.append(frame.waterfall_row)
-            self._waterfall_rows = self._waterfall_rows[-250:]
+
+        if self._waterfall_rows:
             image = np.vstack(self._waterfall_rows)
             self.waterfall_img.setImage(image.T, autoLevels=False, levels=(0.0, 1.0))
             if frame.distance_m.size > 1:
                 width = float(frame.distance_m[-1] - frame.distance_m[0])
                 self.waterfall_img.setRect(float(frame.distance_m[0]), 0.0, width, float(len(self._waterfall_rows)))
-        if frame.peaks:
-            self._peak_distances.append(frame.peaks[0].distance_m)
-            self._peak_distances = self._peak_distances[-500:]
+
+        if self._peak_distances:
             self.peak_history_curve.setData(np.arange(len(self._peak_distances)), self._peak_distances)
 
     def clear_history(self) -> None:

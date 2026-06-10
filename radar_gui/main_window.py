@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QThread, pyqtSlot
+from PyQt6.QtCore import QThread, QTimer, pyqtSlot
 from PyQt6.QtWidgets import (
     QFileDialog,
     QInputDialog,
@@ -40,7 +40,8 @@ from .vna_worker import VnaWorker
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Radar VNA Workbench - LiteVNA / NanoVNA")
+        self.setWindowTitle("Radar VNA Workbench")
+        self._librevna_launcher = None  # managed auto-launch subprocess
         self.resize(1700, 1000)
         self.settings = load_settings()
 
@@ -63,6 +64,12 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._wire()
         self._restore_settings()
+        self._librevna_usb_was_present = False
+        self._auto_connect_timer = QTimer(self)
+        self._auto_connect_timer.setInterval(2000)
+        self._auto_connect_timer.timeout.connect(self._check_auto_connect)
+        self._auto_connect_timer.start()
+        QTimer.singleShot(500, self._check_auto_connect)
 
     def _build_ui(self) -> None:
         left = QWidget()
@@ -105,6 +112,8 @@ class MainWindow(QMainWindow):
     def _wire(self) -> None:
         self.connection.connect_requested.connect(self._connect)
         self.connection.disconnect_requested.connect(self._disconnect)
+        self.connection.load_cal_requested.connect(self._load_calibration)
+        self.connection.conn_type.currentIndexChanged.connect(self._on_conn_type_changed)
         self.sweep.preset_chosen.connect(self._preset_chosen)
         self.radar_controls.config_changed.connect(self._reset_ema)
         self.background.acquire_requested.connect(self._start_background_acquire)
@@ -115,6 +124,7 @@ class MainWindow(QMainWindow):
         self.capture.stop_requested.connect(self._stop_capture)
         self.capture.replay_load_requested.connect(self._load_replay)
         self.replay_view.frame_selected.connect(self._show_replay_frame)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _restore_settings(self) -> None:
         sweep = self.settings.get("last_sweep")
@@ -128,18 +138,100 @@ class MainWindow(QMainWindow):
         port = self.settings.get("port")
         if port:
             self.connection.port.setCurrentText(str(port))
+        conn_type = self.settings.get("conn_type", 0)
+        self.connection.conn_type.setCurrentIndex(int(conn_type))
+        scpi_host = self.settings.get("scpi_host")
+        if scpi_host:
+            self.connection.scpi_host.setText(str(scpi_host))
+        auto_launch = self.settings.get("auto_launch", True)
+        self.connection.auto_launch.setChecked(bool(auto_launch))
+        # Sync IFBW/power visibility with connection type
+        self._on_conn_type_changed()
 
     def _save_ui_settings(self) -> None:
         self.settings["last_sweep"] = self.sweep.config().to_dict()
         self.settings["backend"] = self.connection.selected_backend()
         self.settings["port"] = self.connection.selected_port()
+        self.settings["conn_type"] = self.connection.conn_type.currentIndex()
+        self.settings["scpi_host"] = self.connection.scpi_host.text().strip()
+        self.settings["auto_launch"] = self.connection.auto_launch.isChecked()
         save_settings(self.settings)
+
+    def _on_conn_type_changed(self) -> None:
+        """Toggle LibreVNA-specific UI elements based on connection type."""
+        is_tcp = self.connection.is_tcp_mode()
+        self.sweep.show_librevna_fields(is_tcp)
+
+    def _check_auto_connect(self) -> None:
+        """Periodically check if LibreVNA USB device is plugged in to auto-connect."""
+        if not (self.connection.is_tcp_mode() and self.connection.auto_launch.isChecked()):
+            return
+
+        from .librevna_backend import is_librevna_usb_connected
+        is_plugged = is_librevna_usb_connected()
+
+        if is_plugged and not self._librevna_usb_was_present:
+            self._librevna_usb_was_present = True
+            if self._worker is None:
+                backend_name = self.connection.selected_backend()
+                port = self.connection.scpi_host.text().strip()
+                self._connect(backend_name, port)
+        elif not is_plugged:
+            self._librevna_usb_was_present = False
+
+    def _clear_connection_references(self) -> None:
+        self._worker = None
+        self._thread = None
+
+    def _on_tab_changed(self, index: int) -> None:
+        """Update the newly active tab immediately with the latest data."""
+        # Defer to allow the tab widget to finish its transition and layout pass
+        QTimer.singleShot(50, lambda: self._update_active_tab_deferred(index))
+
+    def _update_active_tab_deferred(self, index: int) -> None:
+        if self.tabs.currentIndex() != index:
+            return
+        widget = self.tabs.widget(index)
+        if widget is self.radar_view and self._last_radar is not None:
+            self.radar_view.update_radar(self._last_radar, active=True)
+        elif widget is self.vna_view and self._last_frame is not None:
+            self.vna_view.update_sweep(self._last_frame)
+        elif widget is self.inspector and self._last_radar is not None:
+            self.inspector.update_inspector(self._last_radar)
 
     @pyqtSlot(str, str)
     def _connect(self, backend_name: str, port: str) -> None:
         if not port:
-            QMessageBox.information(self, "No COM port", "Choose a COM port first.")
+            QMessageBox.information(self, "No port/host", "Choose a COM port or enter an SCPI host first.")
             return
+
+        # Auto-launch LibreVNA-GUI if needed
+        if self.connection.is_tcp_mode() and self.connection.auto_launch.isChecked():
+            from .librevna_backend import LibreVnaScpiBackend, is_port_open
+            host, port_num = LibreVnaScpiBackend._parse_endpoint(port)
+            
+            # Reuse or stop old launcher if host/port changed
+            if self._librevna_launcher is not None:
+                if self._librevna_launcher.host != host or self._librevna_launcher.port != port_num:
+                    try:
+                        self._librevna_launcher.stop()
+                    except Exception:
+                        pass
+                    self._librevna_launcher = None
+
+            if not is_port_open(host, port_num):
+                self.connection.set_status("Launching LibreVNA-GUI...")
+                from .librevna_backend import LibreVnaLauncher
+                if self._librevna_launcher is None:
+                    self._librevna_launcher = LibreVnaLauncher(host=host, port=port_num)
+                if not self._librevna_launcher.ensure_running():
+                    self.connection.set_status(
+                        "Could not launch LibreVNA-GUI. Start it manually or check the path.",
+                        warn=True,
+                    )
+                    return
+                self.connection.set_status("LibreVNA-GUI launched, connecting...")
+
         self._disconnect()
         self._save_ui_settings()
         self._reset_ema()
@@ -150,9 +242,12 @@ class MainWindow(QMainWindow):
         worker.connected.connect(self._on_worker_connected)
         worker.status.connect(lambda msg: self.connection.set_status(msg))
         worker.error.connect(self._on_worker_error)
+        
         worker.stopped.connect(thread.quit)
-        worker.stopped.connect(worker.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_connection_references)
+        
         thread.started.connect(worker.run)
         self._worker = worker
         self._thread = thread
@@ -160,13 +255,26 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _disconnect(self) -> None:
-        if self._worker is not None:
-            self._worker.stop()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(2000)
-        self._worker = None
-        self._thread = None
+        worker = self._worker
+        if worker is not None:
+            try:
+                worker.stop()
+            except RuntimeError:
+                pass
+
+        thread = self._thread
+        if thread is not None:
+            try:
+                thread.quit()
+                finished = thread.wait(2000)
+                if not finished:
+                    print("[WARNING] QThread did not finish within 2000ms", flush=True)
+            except RuntimeError:
+                pass
+        
+        if thread is None or thread.isFinished():
+            self._worker = None
+            self._thread = None
         self.connection.set_connected(False)
 
     @pyqtSlot(str)
@@ -181,6 +289,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_frame(self, frame: SweepFrame) -> None:
+        self.connection.clear_error_status()
         self._last_frame = frame
         if self._acquire_target:
             self._acquire_frames.append(np.array(frame.s21, copy=True))
@@ -229,9 +338,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"DSP error: {exc}", 8000)
             return None
         self._last_radar = radar_frame
-        self.radar_view.update_radar(radar_frame)
-        self.vna_view.update_sweep(frame)
-        self.inspector.update_inspector(radar_frame)
+        
+        # Always update radar_view to collect background waterfall history,
+        # but only render if it is the active/visible tab.
+        active_widget = self.tabs.currentWidget()
+        self.radar_view.update_radar(radar_frame, active=(active_widget is self.radar_view))
+        
+        if active_widget is self.vna_view:
+            self.vna_view.update_sweep(frame)
+        elif active_widget is self.inspector:
+            self.inspector.update_inspector(radar_frame)
+            
         return radar_frame
 
     def _preset_chosen(self, name: str) -> None:
@@ -398,7 +515,58 @@ class MainWindow(QMainWindow):
         self._process_and_update(frame, self._replay.sweep_config, self._replay.radar_config)
         self._ema_state = old_ema
 
+    def _load_calibration(self) -> None:
+        """Load a .cal file onto the connected LibreVNA device."""
+        from .librevna_backend import LibreVnaScpiBackend
+        # Find the vna_gui/cals directory for default location
+        from .storage import PROJECT_DIR
+        cals_dir = str(PROJECT_DIR / "vna_gui" / "cals")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load calibration file",
+            cals_dir,
+            "Calibration files (*.cal);;All files (*)",
+        )
+        if not path:
+            return
+        if not self.connection.is_tcp_mode():
+            QMessageBox.information(self, "Not supported", "Calibration loading is only available for LibreVNA.")
+            return
+
+        was_connected = (self._worker is not None)
+        if was_connected:
+            self._disconnect()
+
+        endpoint = self.connection.scpi_host.text().strip()
+        backend = LibreVnaScpiBackend()
+        ok = False
+        cal_name = ""
+        try:
+            backend.connect(endpoint)
+            ok = backend.load_calibration(path)
+            cal_name = backend.active_calibration()
+            backend.disconnect()
+        except Exception as exc:
+            QMessageBox.warning(self, "Calibration error", str(exc))
+
+        if ok:
+            msg = f"Calibration loaded: {Path(path).name}"
+            if cal_name:
+                msg += f" (active: {cal_name})"
+            self.statusBar().showMessage(msg, 8000)
+            self.connection.set_status(msg)
+        else:
+            self.connection.set_status(f"Failed to load calibration: {Path(path).name}", warn=True)
+
+        if was_connected:
+            backend_name = self.connection.selected_backend()
+            self._connect(backend_name, endpoint)
+
     def closeEvent(self, event) -> None:
         self._save_ui_settings()
         self._disconnect()
+        # Stop any auto-launched LibreVNA-GUI subprocess
+        if self._librevna_launcher is not None:
+            self._librevna_launcher.stop()
+            self._librevna_launcher = None
         super().closeEvent(event)
